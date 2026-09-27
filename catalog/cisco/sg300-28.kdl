@@ -1,0 +1,18 @@
+model {
+  name "Cisco SG300-28"; short "SG300-28"
+  kind "switch"; height 1; depth "half"; ports 28; sfps 2
+
+  face #"""
+     p ~[nnnnnn][nnnnnn] [g] [g]-[s]
+     hhhhhhhh ~[nnnnnn][nnnnnn] [g] [g]-[s]
+    """#
+
+  legend {
+    p power
+    h short
+    n port="▣" down="□"
+    g port="▣" down="□" numbers="25-28" order="down"
+    s sfp="▬" down="▭" numbers="27-28" order="down"
+    ~ fill
+  }
+}

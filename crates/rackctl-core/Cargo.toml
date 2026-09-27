@@ -1,0 +1,23 @@
+[package]
+name = "rackctl-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Core library for rackctl: device catalog, rack model and configuration loading"
+publish.workspace = true
+
+[dependencies]
+kdl.workspace = true
+miette.workspace = true
+strum.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+miette = { workspace = true, features = ["fancy-no-backtrace"] }
+tempfile.workspace = true
+
+[lints]
+workspace = true

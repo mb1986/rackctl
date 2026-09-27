@@ -1,0 +1,17 @@
+# Cargo build output. Cargo.lock is committed because the workspace builds a binary.
+/target/
+**/*.rs.bk
+
+# Local working files: the design plan and the prototype tools
+/docs/
+/tools/
+
+# Editors
+.idea/
+.vscode/
+*.iml
+*.swp
+
+# Operating systems
+.DS_Store
+Thumbs.db

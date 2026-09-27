@@ -1,0 +1,13 @@
+model {
+  name "Patch Panel 24"
+  kind "patch-panel"; height 1; depth "half"; ports 24
+
+  face #"""
+     n n n n n n n n n n n n n n n n n n n n n n n n
+     1     4       8      12      16      20      24
+    """#
+
+  legend {
+    n port="▣"
+  }
+}

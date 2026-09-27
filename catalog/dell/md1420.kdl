@@ -1,0 +1,21 @@
+model {
+  name "Dell PowerVault MD1420"; short "MD1420"
+  kind "storage"; height 2; bays 24; psus 2
+
+  face #"""
+     p nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn ~hhhhhh .
+     b b b b b b b b b b b b b b b b b b b b b b b b
+     | | | | | | | | | | | | | | | | | | | | | | | |
+     ~P [s] [s].
+    """#
+
+  legend {
+    p power
+    n name
+    h short
+    s psu
+    b bay="𜷝𜶺" first=0 order="right"
+    ~ fill
+    . space
+  }
+}

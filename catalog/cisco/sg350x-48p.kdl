@@ -1,0 +1,18 @@
+model {
+  name "Cisco SG350X-48P"; short "SG350X-48P"
+  kind "switch"; height 1; depth "half"; ports 50; sfps 4
+
+  face #"""
+     p ~[nnnnnn][nnnnnn][nnnnnn][nnnnnn] [g]-[s] [s]
+     ttt~[nnnnnn][nnnnnn][nnnnnn][nnnnnn] [g]-[s] [s]
+    """#
+
+  legend {
+    p power
+    t text="48P"
+    n port="▣" down="□"
+    g port="▣" down="□" numbers="1-2" order="down" group="XG"
+    s sfp="▬" down="▭" numbers="1-4" order="down" group="XG"
+    ~ fill
+  }
+}

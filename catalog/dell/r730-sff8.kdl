@@ -1,0 +1,22 @@
+model {
+  name "Dell PowerEdge R730"; short "R730"
+  kind "server"; height 2; bays 8; psus 2; nics 4
+
+  face #"""
+     p nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn ~hhhh .
+       𜱂𜱂𜱂𜱂𜱂𜱂𜱂𜱂𜱂𜱂𜱂𜱂 b b b b b b b b 𜱂𜱂𜱂𜱂𜱂𜱂𜱂𜱂𜱂𜱂𜱂𜱂𜱂𜱂𜱂
+       𜱂𜱂𜱂𜱂𜱂𜱂𜱂𜱂𜱂𜱂𜱂𜱂 | | | | | | | | 𜱂𜱂𜱂𜱂𜱂𜱂𜱂𜱂𜱂𜱂𜱂𜱂𜱂𜱂𜱂
+       ~N l l l l   P [s] [s].
+    """#
+
+  legend {
+    p power
+    n name
+    h short
+    s psu
+    b bay="𜷝𜶺" first=0 order="right"
+    l nic="▣" down="□"
+    ~ fill
+    . space
+  }
+}

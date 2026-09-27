@@ -1,0 +1,28 @@
+model {
+  name "Dell PowerEdge T640"; short "T640"
+  kind "server"; height 5; bays 16; psus 2; nics 2
+
+  face #"""
+     p nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn ~hhhh .
+       𜱁𜱁𜱁𜱁𜱁𜱁 𜱁𜱁𜱁𜱁𜱁𜱁 𜱁𜱁𜱁𜱁𜱁𜱁 ┃ 𜱁𜱁𜱁𜱁𜱁𜱁𜱁 ~[b___] [b___].
+       𜱁𜱁𜱁𜱁𜱁𜱁 𜱁𜱁𜱁𜱁𜱁𜱁 𜱁𜱁𜱁𜱁𜱁𜱁 ┃ 𜱁𜱁𜱁𜱁𜱁𜱁𜱁 ~[b___] [b___].
+       𜱁𜱁𜱁𜱁𜱁𜱁 𜱁𜱁𜱁𜱁𜱁𜱁 𜱁𜱁𜱁𜱁𜱁𜱁 ┃ 𜱁𜱁𜱁𜱁𜱁𜱁𜱁 ~[b___] [b___].
+       𜱁𜱁𜱁𜱁𜱁𜱁 𜱁𜱁𜱁𜱁𜱁𜱁 𜱁𜱁𜱁𜱁𜱁𜱁 ┃ 𜱁𜱁𜱁𜱁𜱁𜱁𜱁 ~[b___] [b___].
+       𜱁𜱁𜱁𜱁𜱁𜱁 𜱁𜱁𜱁𜱁𜱁𜱁 𜱁𜱁𜱁𜱁𜱁𜱁 ┃ 𜱁𜱁𜱁𜱁𜱁𜱁𜱁 ~[b___] [b___].
+       𜱁𜱁𜱁𜱁𜱁𜱁 𜱁𜱁𜱁𜱁𜱁𜱁 𜱁𜱁𜱁𜱁𜱁𜱁 ┃ 𜱁𜱁𜱁𜱁𜱁𜱁𜱁 ~[b___] [b___].
+       𜱁𜱁𜱁𜱁𜱁𜱁 𜱁𜱁𜱁𜱁𜱁𜱁 𜱁𜱁𜱁𜱁𜱁𜱁 ┃ 𜱁𜱁𜱁𜱁𜱁𜱁𜱁 ~[b___] [b___].
+       𜱁𜱁𜱁𜱁𜱁𜱁 𜱁𜱁𜱁𜱁𜱁𜱁 𜱁𜱁𜱁𜱁𜱁𜱁 ┃ 𜱁𜱁𜱁𜱁𜱁𜱁𜱁 ~[b___] [b___].
+      ~N l l  P [s] [s]~.
+    """#
+
+  legend {
+    p power
+    h short
+    n name
+    s psu order="left"
+    b bay="■" order="up" first=0
+    l nic="▣" down="□" order="left"
+    ~ fill
+    . space
+  }
+}

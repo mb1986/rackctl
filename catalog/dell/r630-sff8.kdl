@@ -1,0 +1,20 @@
+model {
+  name "Dell PowerEdge R630"; short "R630"
+  kind "server"; height 1; bays 8; psus 2; nics 4; mgmt 1
+
+  face #"""
+     p nnnnnnn hhhh~[b___] [b___] [b___]  N l l l l.
+     ~[b___] [b___] [b___] [b___] [b___]  P [s] [s].
+    """#
+
+  legend {
+    p power
+    h short
+    n name
+    s psu
+    b bay="■" first=0 order="down" layout="--xxx,xxxxx"
+    l nic="▣" down="□"
+    ~ fill
+    . space
+  }
+}

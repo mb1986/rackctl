@@ -1,0 +1,80 @@
+model {
+  name "APC AP7952 Switched Rack PDU"; short "AP7952"
+  kind "pdu"; mount "side"; outlets 24; nics 1
+
+  face strip=#true #"""
+    p ttt
+     uuuu
+
+    aaaaa
+
+    N[n]
+
+
+     1 x
+
+
+     2 o
+
+     3 o
+
+     4 o
+
+     5 o
+
+     6 o
+
+     7 o
+
+     8 o
+
+
+     9 x
+
+
+    10 o
+
+    11 o
+
+    12 o
+
+    13 o
+
+    14 o
+
+    15 o
+
+    16 o
+
+
+    17 x
+
+
+    18 o
+
+    19 o
+
+    20 o
+
+    21 o
+
+    22 o
+
+    23 o
+
+    24 o
+    ~
+    """#
+
+  legend {
+    p power
+    t text="APC"
+    u text="7952"
+    a amps align="right"
+    o outlet="■" off="■" order="down" type="C13" rating="10A"
+    x outlet="█" off="█" order="down" type="C19" rating="16A" numbers="1,9,17"
+    n nic="▣" down="□"
+    ~ fill
+    . space
+  }
+}

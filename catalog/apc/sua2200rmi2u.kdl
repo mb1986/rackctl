@@ -1,0 +1,18 @@
+model {
+  name "APC Smart-UPS 2200"; short "UPS 2200"
+  kind "ups"; height 2
+
+  face #"""
+     p ~ssssssss.
+      𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀  ▓▓▓▓▓▓▓
+      𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀𜱀  ▓▓▓▓▓▓▓
+
+    """#
+
+  legend {
+    p power
+    s short
+    ~ fill
+    . space
+  }
+}

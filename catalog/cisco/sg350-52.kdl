@@ -1,0 +1,18 @@
+model {
+  name "Cisco SG350-52"; short "SG350-52"
+  kind "switch"; height 1; depth "half"; ports 50; sfps 4
+
+  face #"""
+     p ~[nnnnnn][nnnnnn][nnnnnn][nnnnnn] [g]-[s] [s]
+     tt~[nnnnnn][nnnnnn][nnnnnn][nnnnnn] [g]-[s] [s]
+    """#
+
+  legend {
+    p power
+    t text="52"
+    n port="▣" down="□"
+    g port="▣" down="□" numbers="49-50" order="down"
+    s sfp="▬" down="▭" numbers="49-52" order="down"
+    ~ fill
+  }
+}
