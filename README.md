@@ -12,8 +12,18 @@ a PDU outlet.
 
 ## Status
 
-Early development. The core library loads the device catalog and the rack layout and checks
-them. The command-line tool and the terminal UI are not available yet.
+Early development. `rackctl check` validates the configuration and the catalog. Device
+control and the terminal UI are not available yet.
+
+## Usage
+
+```sh
+rackctl check              # check ~/.config/rackctl/rack.kdl and summarize the rack
+rackctl check -c rack.kdl  # check another rack file
+```
+
+`check` exits with code 2 when the configuration has problems, and reports each of them
+with its location in the file.
 
 ## Configuration
 

@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `rackctl check`: validates the rack file and every catalog model, then summarizes the rack:
+  devices by kind, used and free units, and side strips. The rack file is taken from `-c`,
+  `$RACKCTL_CONFIG` or `$XDG_CONFIG_HOME/rackctl/rack.kdl` (by default
+  `~/.config/rackctl/rack.kdl`); user models are read from `catalog/` next to it.
 - Device catalog with selected models of Dell, Cisco, APC, HPE and Ubiquiti hardware, plus
   generic models. Models are read from the built-in catalog and the user's catalog, and each model
   file is loaded only when it is first used.

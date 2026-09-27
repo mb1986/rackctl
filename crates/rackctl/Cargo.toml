@@ -1,0 +1,26 @@
+[package]
+name = "rackctl"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
+
+[dependencies]
+rackctl-core.workspace = true
+anstream.workspace = true
+anstyle.workspace = true
+clap.workspace = true
+miette = { workspace = true, features = ["fancy-no-backtrace"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
