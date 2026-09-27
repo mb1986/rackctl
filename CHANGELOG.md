@@ -21,5 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Checks with precise error messages: unknown or misspelled nodes, properties and models,
   devices that do not fit in the rack, and overlapping devices. Two half-depth devices may
   share a unit on the front and the rear.
+- Rack names, device ids and model file names use lowercase letters, digits and `-`, and
+  do not start or end with `-`. Hidden files and links to directories in a catalog
+  directory are ignored.
 
 [Unreleased]: https://github.com/mb1986/rackctl/commits/main

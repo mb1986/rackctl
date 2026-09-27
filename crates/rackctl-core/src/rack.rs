@@ -7,8 +7,8 @@ use miette::SourceSpan;
 use strum::{EnumString, IntoStaticStr, VariantNames};
 
 use crate::catalog::{Catalog, Depth, Model, ModelError, Mount};
-use crate::is_identifier;
 use crate::kdl_reader::{self, NodeReader, Problem, closest};
+use crate::{IDENTIFIER_RULE, is_identifier};
 
 /// The largest number of units a rack may have.
 pub const MAX_UNITS: u8 = 60;
@@ -48,8 +48,19 @@ pub struct DeviceSpans {
     pub id: SourceSpan,
     /// The `model` value.
     pub model: SourceSpan,
-    /// The `u` value, or the `mount` value of a strip placed from the bottom of the rack.
-    pub placement: SourceSpan,
+    /// The `u` value, when it is given.
+    pub u: Option<SourceSpan>,
+    /// The `mount` value, when it is given.
+    pub mount: Option<SourceSpan>,
+}
+
+impl DeviceSpans {
+    /// Returns where the device's position is given: its `u` value, or the `mount` value of
+    /// a strip placed from the bottom of the rack.
+    #[must_use]
+    pub fn placement(&self) -> SourceSpan {
+        self.u.or(self.mount).unwrap_or(self.node)
+    }
 }
 
 /// Where a device is mounted. The number of units it covers comes from its catalog model.
@@ -141,7 +152,7 @@ impl Rack {
                             device.id,
                             describe_units(&units)
                         ),
-                        device.spans.placement,
+                        device.spans.placement(),
                     )
                     .with_label(format!("the rack has {} units", self.units)),
                 );
@@ -257,10 +268,14 @@ fn mount_mismatch(device: &Device, model: &Model) -> Option<Problem> {
         (Placement::Strip { .. }, Mount::Rack) => Some(
             Problem::new(
                 format!("`{}` is mounted in the rack's slots, not beside it", device.model),
-                device.spans.placement,
+                device.spans.mount.unwrap_or(device.spans.node),
             )
             .with_label("needs a model with `mount \"side\"`")
-            .with_help("remove `mount` and give the lowest unit with u=N"),
+            .with_help(if device.spans.u.is_some() {
+                "remove `mount`"
+            } else {
+                "remove `mount` and give the lowest unit with u=N"
+            }),
         ),
         _ => None,
     }
@@ -282,11 +297,11 @@ fn overlap(
     }
     let problem = Problem::new(
         format!("`{}` overlaps `{}` on {}", device.id, other.id, describe_units(&shared)),
-        device.spans.placement,
+        device.spans.placement(),
     )
     .with_label(format!("`{}` covers {}", device.id, describe_units(units)))
     .with_label_at(
-        other.spans.placement,
+        other.spans.placement(),
         format!("`{}` covers {}", other.id, describe_units(other_units)),
     );
     Some(if device.face == other.face {
@@ -326,8 +341,12 @@ fn read_rack(node: &KdlNode, problems: &mut Vec<Problem>) -> Option<Rack> {
         }
         units => units,
     };
+    if name.as_deref().is_some_and(|name| !is_identifier(name)) {
+        problems.push(Problem::new(format!("rack names {IDENTIFIER_RULE}"), entry_span(node, 0)));
+    }
 
-    let mut devices: Vec<Device> = Vec::new();
+    let mut devices = Vec::new();
+    let mut ids: Vec<(&str, SourceSpan)> = Vec::new();
     for child in block.map(KdlDocument::nodes).unwrap_or_default() {
         let key = child.name().value();
         if key != "device" {
@@ -339,18 +358,20 @@ fn read_rack(node: &KdlNode, problems: &mut Vec<Problem>) -> Option<Rack> {
             problems.push(problem);
             continue;
         }
-        let Some(device) = read_device(child, units, problems) else { continue };
-        if let Some(first) = devices.iter().find(|other| other.id == device.id) {
-            problems.push(
-                Problem::new(
-                    format!("the device id `{}` is used more than once", device.id),
-                    device.spans.id,
-                )
-                .with_label("used again here")
-                .with_label_at(first.spans.id, "first used here"),
-            );
+        // Ids are compared even for devices with other problems, so that a repeated id is
+        // reported however many mistakes the devices have.
+        if let Some(id) = child.entry(0).and_then(|entry| entry.value().as_string()) {
+            let span = entry_span(child, 0);
+            if let Some(&(_, first)) = ids.iter().find(|&&(other, _)| other == id) {
+                problems.push(
+                    Problem::new(format!("the device id `{id}` is used more than once"), span)
+                        .with_label("used again here")
+                        .with_label_at(first, "first used here"),
+                );
+            }
+            ids.push((id, span));
         }
-        devices.push(device);
+        devices.extend(read_device(child, units, problems));
     }
 
     Some(Rack { name: name?, units: units?, devices })
@@ -364,15 +385,13 @@ fn read_device(node: &KdlNode, units: Option<u8>, problems: &mut Vec<Problem>) -
     let u = reader.opt_int::<u8>("u");
     let side = reader.opt_enum::<Side>("mount");
     let face = reader.opt_enum::<Face>("face").unwrap_or_default();
+    let u_misspelled = reader.has_misspelling_of("u");
     reader.finish();
 
     if id.as_deref().is_some_and(|id| !is_identifier(id)) {
-        problems.push(Problem::new(
-            "device ids may only use lowercase letters, digits and `-`",
-            entry_span(node, 0),
-        ));
+        problems.push(Problem::new(format!("device ids {IDENTIFIER_RULE}"), entry_span(node, 0)));
     }
-    if node.entry("u").is_none() && node.entry("mount").is_none() {
+    if node.entry("u").is_none() && node.entry("mount").is_none() && !u_misspelled {
         problems.push(
             Problem::new("`device` is missing the property `u`", node.name().span())
                 .with_label("add u=...")
@@ -402,10 +421,8 @@ fn read_device(node: &KdlNode, units: Option<u8>, problems: &mut Vec<Problem>) -
         node: node.span(),
         id: entry_span(node, 0),
         model: entry_span(node, "model"),
-        placement: node
-            .entry("u")
-            .or_else(|| node.entry("mount"))
-            .map_or_else(|| node.name().span(), KdlEntry::span),
+        u: node.entry("u").map(KdlEntry::span),
+        mount: node.entry("mount").map(KdlEntry::span),
     };
     Some(Device { id: id?, model: model?, placement, face, spans })
 }
@@ -569,7 +586,8 @@ mod tests {
                 node: SourceSpan::from(0..0),
                 id: SourceSpan::from(0..0),
                 model: SourceSpan::from(0..0),
-                placement: SourceSpan::from(0..0),
+                u: None,
+                mount: None,
             },
         };
         assert_eq!(device(Placement::Slot { u: 28 }).units(&server, 36), 28..=29);
@@ -599,6 +617,17 @@ mod tests {
                 "`x/server` is mounted in the rack's slots, not beside it",
             ]
         );
+    }
+
+    #[test]
+    fn points_a_mount_mismatch_at_the_mount() {
+        let text = r#"device "b" model="x/server" u=1 mount="left""#;
+        let problems = check(text);
+        let mount = text.find("mount=").expect("mount in the text");
+        // The rack node and a newline come before the device in the checked text.
+        let offset = "rack \"r\" units=36 {\n".len();
+        assert_eq!(problems[0].span().offset(), offset + mount);
+        assert_eq!(problems[0].help(), Some("remove `mount`"));
     }
 
     #[test]
@@ -692,10 +721,43 @@ mod tests {
                 }"#
             ),
             [
-                "device ids may only use lowercase letters, digits and `-`",
-                "the device id `srv02` is used more than once",
+                format!("device ids {IDENTIFIER_RULE}"),
+                "the device id `srv02` is used more than once".to_owned(),
             ]
         );
+    }
+
+    #[test]
+    fn reports_ids_and_rack_names_that_break_the_rule() {
+        assert_eq!(
+            messages(r#"rack "-r" units=36 { device "srv-" model="x/a" u=1 }"#),
+            [format!("rack names {IDENTIFIER_RULE}"), format!("device ids {IDENTIFIER_RULE}")]
+        );
+    }
+
+    #[test]
+    fn reports_a_repeated_id_even_when_the_other_device_has_problems() {
+        assert_eq!(
+            messages(
+                r#"rack "r" units=36 {
+                    device "a" u=1
+                    device "a" model="x/a" u=2
+                }"#
+            ),
+            [
+                "`device` is missing the property `model`",
+                "the device id `a` is used more than once"
+            ]
+        );
+    }
+
+    #[test]
+    fn reports_a_misspelled_unit_once() {
+        let problems = Rack::parse(r#"rack "r" units=36 { device "a" model="x/a" U=1 }"#)
+            .expect_err("misspelled u");
+        assert_eq!(problems.len(), 1);
+        assert_eq!(problems[0].message(), "unknown property `U` on `device`");
+        assert_eq!(problems[0].help(), Some("did you mean `u`?"));
     }
 
     #[test]

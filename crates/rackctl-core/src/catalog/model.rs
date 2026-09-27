@@ -206,7 +206,7 @@ fn read_model(id: &str, node: &KdlNode, problems: &mut Vec<Problem>) -> Option<M
 
     for child in block.map(KdlDocument::nodes).unwrap_or_default() {
         let key = child.name().value();
-        if !REPEATABLE.contains(&key) && seen.contains(&key) {
+        if NODES.contains(&key) && !REPEATABLE.contains(&key) && seen.contains(&key) {
             problems.push(Problem::new(
                 format!("`{key}` is given more than once"),
                 child.name().span(),
@@ -260,8 +260,9 @@ fn read_model(id: &str, node: &KdlNode, problems: &mut Vec<Problem>) -> Option<M
                 .with_help("add a `face` or remove the `legend`"),
         );
     }
-    for (value, key) in [(name.is_some(), "name"), (kind.is_some(), "kind")] {
-        if !value {
+    // A node that is present but invalid has already been reported.
+    for key in ["name", "kind"] {
+        if !seen.contains(&key) {
             problems.push(
                 Problem::new(format!("the model is missing `{key}`"), node.name().span())
                     .with_label(format!("add `{key}` inside this block")),
@@ -402,8 +403,21 @@ mod tests {
     fn reports_an_unknown_kind_with_a_suggestion() {
         let problems =
             Model::parse("x/y", r#"model { name "X"; kind "swich" }"#).expect_err("invalid kind");
+        assert_eq!(problems.len(), 1);
         assert!(problems[0].message().starts_with("`kind` must be one of `server`, "));
         assert_eq!(problems[0].help(), Some("did you mean `switch`?"));
+    }
+
+    #[test]
+    fn reports_each_mistake_once() {
+        assert_eq!(
+            messages(r#"model { name; kind "server"; foo 1; foo 2 }"#),
+            [
+                "`name` is missing its name",
+                "unknown node `foo` in a model",
+                "unknown node `foo` in a model",
+            ]
+        );
     }
 
     #[test]

@@ -39,11 +39,16 @@ fn main() -> io::Result<()> {
     fs::write(out_dir.join("builtin_catalog.rs"), code)
 }
 
-/// Adds every `.kdl` file in `dir` and its subdirectories to `files`.
+/// Adds every `.kdl` file in `dir` and its subdirectories to `files`, skipping hidden
+/// entries and symbolic links to directories, as the catalog does for user directories.
 fn collect(dir: &Path, files: &mut Vec<PathBuf>) -> io::Result<()> {
     for entry in fs::read_dir(dir)? {
-        let path = entry?.path();
-        if path.is_dir() {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
+        if entry.file_type()?.is_dir() {
             collect(&path, files)?;
         } else if path.extension().is_some_and(|extension| extension == "kdl") {
             files.push(path);

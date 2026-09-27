@@ -15,8 +15,8 @@ use thiserror::Error;
 
 pub use model::{Components, Depth, Ears, Kind, Model, Mount};
 
-use crate::is_identifier;
 use crate::kdl_reader::{FileError, Problem, closest};
+use crate::{IDENTIFIER_RULE, is_identifier};
 
 /// The device catalog: every hardware model available to the racks.
 ///
@@ -167,13 +167,21 @@ impl Catalog {
     }
 
     /// Adds the model files in `dir` and its subdirectories, naming them relative to `root`.
+    ///
+    /// Hidden entries, whose names start with `.`, are skipped. Symbolic links to
+    /// directories are not followed, so a link cannot make the search loop.
     fn add_dir(&mut self, root: &Path, dir: &Path) -> io::Result<()> {
-        let mut paths = fs::read_dir(dir)?
-            .map(|entry| entry.map(|entry| entry.path()))
-            .collect::<io::Result<Vec<_>>>()?;
-        paths.sort();
-        for path in paths {
-            if path.is_dir() {
+        let mut entries = Vec::new();
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            entries.push((entry.path(), entry.file_type()?));
+        }
+        entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+        for (path, file_type) in entries {
+            if is_hidden(&path) {
+                continue;
+            }
+            if file_type.is_dir() {
                 self.add_dir(root, &path)?;
             } else if is_model_file(&path) {
                 self.insert(model_id(root, &path), Origin::User, Source::File(path));
@@ -181,6 +189,12 @@ impl Catalog {
         }
         Ok(())
     }
+}
+
+/// Returns whether the file or directory is hidden: its name starts with `.`, like the lock
+/// files some editors create next to the file being edited.
+fn is_hidden(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| name.to_string_lossy().starts_with('.'))
 }
 
 /// Model files end in `.kdl`. Files starting with `_` hold shared parts of other models
@@ -207,11 +221,9 @@ fn is_valid_id(id: &str) -> bool {
 }
 
 fn invalid_name(name: String) -> FileError {
-    let problem = Problem::new(
-        "model file names may only use lowercase letters, digits and `-`",
-        SourceSpan::from(0..0),
-    )
-    .with_help("rename the file, for example `dell/r630-sff8.kdl`");
+    let problem =
+        Problem::new(format!("model file names {IDENTIFIER_RULE}"), SourceSpan::from(0..0))
+            .with_help("rename the file, for example `dell/r630-sff8.kdl`");
     FileError::new(name, "", vec![problem])
 }
 
@@ -307,6 +319,28 @@ mod tests {
     }
 
     #[test]
+    fn skips_hidden_files_and_directories() {
+        let dir = dir_with(&[
+            ("dell/r630-sff8.kdl", R630),
+            ("dell/.#r630-sff8.kdl", "editor lock file"),
+            (".git/models.kdl", "anything"),
+        ]);
+        let catalog = Catalog::open(&[dir.path()]).expect("readable directory");
+
+        assert_eq!(catalog.ids().collect::<Vec<_>>(), ["dell/r630-sff8"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn does_not_follow_links_to_directories() {
+        let dir = dir_with(&[("dell/r630-sff8.kdl", R630)]);
+        std::os::unix::fs::symlink(dir.path(), dir.path().join("dell/loop")).expect("symlink");
+        let catalog = Catalog::open(&[dir.path()]).expect("readable directory");
+
+        assert_eq!(catalog.ids().collect::<Vec<_>>(), ["dell/r630-sff8"]);
+    }
+
+    #[test]
     fn suggests_a_similar_identifier() {
         let dir = dir_with(&[("dell/r630-sff8.kdl", R630)]);
         let catalog = Catalog::open(&[dir.path()]).expect("readable directory");
@@ -327,9 +361,11 @@ mod tests {
         let Err(ModelError::Invalid(error)) = catalog.model("Dell/R630") else {
             panic!("expected an invalid model");
         };
-        assert_eq!(
-            error.problems()[0].message(),
-            "model file names may only use lowercase letters, digits and `-`"
-        );
+        assert_eq!(error.problems()[0].message(), format!("model file names {IDENTIFIER_RULE}"));
+        assert!(catalog.ids().eq(["Dell/R630"]));
+
+        let dir = dir_with(&[("dell/r630-.kdl", R630)]);
+        let catalog = Catalog::open(&[dir.path()]).expect("readable directory");
+        assert!(matches!(catalog.model("dell/r630-"), Err(ModelError::Invalid(_))));
     }
 }

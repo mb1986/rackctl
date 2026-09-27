@@ -327,29 +327,45 @@ impl<'n, 'p> NodeReader<'n, 'p> {
     /// Returns the property `key`.
     ///
     /// When a property appears more than once, the last value is used, as the KDL
-    /// specification requires, and each repetition is reported.
+    /// specification requires, and the repetition is reported once.
     fn property(&mut self, key: &str) -> Option<&'n KdlEntry> {
         self.known_properties.push(key.to_owned());
-        let mut found = None;
+        let mut found = Vec::new();
         for (position, entry) in self.node.entries().iter().enumerate() {
             if entry.name().is_some_and(|name| name.value() == key) {
-                if found.is_some() {
-                    let problem =
-                        Problem::new(format!("`{key}` is given more than once"), entry.span())
-                            .with_label("repeated here; this value is used");
-                    self.problems.push(problem);
-                }
                 self.used[position] = true;
-                found = Some(entry);
+                found.push(entry);
             }
         }
-        found
+        if let [first, second, rest @ ..] = found.as_slice() {
+            let mut problem =
+                Problem::new(format!("`{key}` is given more than once"), second.span())
+                    .with_label("given again here")
+                    .with_label_at(first.span(), "first given here");
+            for entry in rest {
+                problem = problem.with_label_at(entry.span(), "given again here");
+            }
+            self.problems.push(problem);
+        }
+        found.last().copied()
+    }
+
+    /// Returns whether the node has a property whose name looks like a misspelling of `key`,
+    /// such as `modle` for `model`. [`NodeReader::finish`] reports that property with a
+    /// suggestion, so a missing `key` need not be reported as well.
+    #[must_use]
+    pub fn has_misspelling_of(&self, key: &str) -> bool {
+        self.node
+            .entries()
+            .iter()
+            .filter_map(KdlEntry::name)
+            .any(|name| name.value() != key && closest(name.value(), [key].into_iter()).is_some())
     }
 
     /// Returns the property `key`, or reports that it is missing.
     fn required(&mut self, key: &str) -> Option<&'n KdlEntry> {
         let entry = self.property(key);
-        if entry.is_none() {
+        if entry.is_none() && !self.has_misspelling_of(key) {
             let problem = Problem::new(
                 format!("`{}` is missing the property `{key}`", self.name()),
                 self.node.name().span(),
@@ -410,20 +426,27 @@ fn describe(value: &KdlValue) -> String {
     match value {
         KdlValue::String(text) => format!("the string \"{text}\""),
         KdlValue::Integer(number) => format!("the number {number}"),
-        KdlValue::Float(number) => format!("the number {number}"),
+        KdlValue::Float(number) => format!("the number {number:?}"),
         KdlValue::Bool(flag) => format!("#{flag}"),
         KdlValue::Null => "#null".to_owned(),
     }
 }
 
 /// Returns the candidate most similar to `word`, if it is similar enough to be a likely
-/// typo.
+/// typo. A candidate that differs only in letter case, such as `u` for `U`, always is.
 pub(crate) fn closest<'c>(
     word: &str,
     candidates: impl Iterator<Item = &'c str>,
 ) -> Option<&'c str> {
     candidates
-        .map(|candidate| (edit_distance(word, candidate), candidate))
+        .map(|candidate| {
+            let distance = if word.eq_ignore_ascii_case(candidate) {
+                0
+            } else {
+                edit_distance(word, candidate)
+            };
+            (distance, candidate)
+        })
         .filter(|&(distance, candidate)| distance <= 2 && distance < candidate.len())
         .min_by_key(|&(distance, _)| distance)
         .map(|(_, candidate)| candidate)
@@ -505,11 +528,12 @@ mod tests {
 
     #[test]
     fn reports_wrong_types_and_ranges() {
-        let problems = problems_for(r#"device "a" u="30" height=300 model=1"#, |node| {
+        let problems = problems_for(r#"device "a" u="30" height=300 model=1 depth=1.0"#, |node| {
             let _ = node.arg_str(0, "name");
             assert_eq!(node.opt_int::<u8>("u"), None);
             assert_eq!(node.opt_int::<u8>("height"), None);
             assert_eq!(node.opt_str("model"), None);
+            assert_eq!(node.opt_int::<u8>("depth"), None);
         });
         assert_eq!(
             messages(&problems),
@@ -517,6 +541,7 @@ mod tests {
                 "`u` must be a whole number, found the string \"30\"",
                 "`height` is out of range: 300",
                 "`model` must be a string, found the number 1",
+                "`depth` must be a whole number, found the number 1.0",
             ]
         );
     }
@@ -550,12 +575,37 @@ mod tests {
     }
 
     #[test]
-    fn uses_the_last_of_repeated_properties_and_reports_it() {
-        let problems = problems_for(r#"device "a" u=1 u=2"#, |node| {
+    fn uses_the_last_of_repeated_properties_and_reports_it_once() {
+        let problems = problems_for(r#"device "a" u=1 u=2 u=3"#, |node| {
             let _ = node.arg_str(0, "name");
-            assert_eq!(node.opt_int::<u8>("u"), Some(2));
+            assert_eq!(node.opt_int::<u8>("u"), Some(3));
         });
         assert_eq!(messages(&problems), ["`u` is given more than once"]);
+        let labels: Vec<_> = problems[0]
+            .labels()
+            .expect("labels")
+            .map(|label| label.label().unwrap_or_default().to_owned())
+            .collect();
+        assert_eq!(labels, ["given again here", "first given here", "given again here"]);
+    }
+
+    #[test]
+    fn reports_a_misspelled_required_property_only_once() {
+        let problems = problems_for(r#"device "a" modle="x/y""#, |node| {
+            let _ = node.arg_str(0, "name");
+            assert_eq!(node.req_str("model"), None);
+        });
+        assert_eq!(messages(&problems), ["unknown property `modle` on `device`"]);
+        assert_eq!(problems[0].help(), Some("did you mean `model`?"));
+    }
+
+    #[test]
+    fn suggests_names_that_differ_only_in_case() {
+        let problems = problems_for(r#"device "a" U=1"#, |node| {
+            let _ = node.arg_str(0, "name");
+            let _ = node.opt_int::<u8>("u");
+        });
+        assert_eq!(problems[0].help(), Some("did you mean `u`?"));
     }
 
     #[test]
