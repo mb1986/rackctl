@@ -1,0 +1,8 @@
+wiring {
+  power "pdu:8"            "srv01:psu1"
+  power "pdu:7"            "srv01:psu2"
+  mgmt  "srv01:mgmt"       "patch-32:back15"
+  mgmt  "patch-32:front15" "sg300:10"
+  net   "srv01:nic3"       "patch-32:back14"
+  net   "patch-32:front14" "sg300:11"
+}

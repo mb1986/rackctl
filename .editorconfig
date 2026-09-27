@@ -12,5 +12,8 @@ max_line_length = 100
 [*.md]
 trim_trailing_whitespace = false
 
+[tests/golden/**.{txt,ansi}]
+trim_trailing_whitespace = false
+
 [*.{kdl,toml,yml,yaml,json}]
 indent_size = 2

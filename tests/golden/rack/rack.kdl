@@ -1,0 +1,18 @@
+rack "lab" units=36 {
+  device "router"   model="ubiquiti/er6p"          u=36
+  device "patch-34" model="generic/patchpanel-24"  u=34
+  device "sg300"    model="cisco/sg300-28"         u=33
+  device "patch-32" model="generic/patchpanel-24"  u=32
+  device "sg350"    model="cisco/sg350-28"         u=31
+  device "srv01"    model="dell/r630-sff8"         u=30
+  device "srv02"    model="dell/r730-sff8"         u=28
+  device "srv03"    model="dell/r730xd-sff24"      u=26
+  device "kvm"      model="hpe/lcd-8500"           u=25
+  device "srv04"    model="dell/t640-sff16"        u=20
+  device "srv05"    model="dell/r730xd-lff12"      u=16
+  device "md1420"   model="dell/md1420"            u=14
+  device "md1200-b" model="dell/md1200"            u=12
+  device "md1200-a" model="dell/md1200"            u=10
+  device "ups"      model="apc/sua2200rmi2u"       u=1
+  device "pdu"      model="apc/ap7952"             mount="right" face="rear"
+}
