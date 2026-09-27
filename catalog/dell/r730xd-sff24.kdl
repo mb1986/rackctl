@@ -15,7 +15,7 @@ model {
     h short
     s psu
     b bay="𜷝𜶺" first=0 order="right"
-    l nic="▣" down="□"
+    l nic
     ~ fill
     . space
   }

@@ -14,7 +14,7 @@ model {
     n name
     h short
     s psu
-    b bay="■" first=0 order="down"
+    b bay first=0 order="down"
     ~ fill
     . space
   }

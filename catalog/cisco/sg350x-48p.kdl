@@ -10,9 +10,9 @@ model {
   legend {
     p power
     t text="48P"
-    n port="▣" down="□"
-    g port="▣" down="□" numbers="1-2" order="down" group="XG"
-    s sfp="▬" down="▭" numbers="1-4" order="down" group="XG"
+    n port
+    g port numbers="1-2" order="down" group="XG"
+    s sfp numbers="1-4" order="down" group="XG"
     ~ fill
   }
 }

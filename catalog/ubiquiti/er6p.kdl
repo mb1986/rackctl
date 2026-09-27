@@ -11,8 +11,8 @@ model {
     p power
     n name
     h short
-    l port="▣" down="□" first=0
-    s sfp="▬" down="▭" numbers="5"
+    l port first=0
+    s sfp numbers="5"
     ~ fill
     . space
   }
