@@ -18,6 +18,7 @@ anstream.workspace = true
 anstyle.workspace = true
 clap.workspace = true
 miette = { workspace = true, features = ["fancy-no-backtrace"] }
+textwrap.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

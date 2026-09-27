@@ -25,6 +25,7 @@ miette = "7.6.0"
 strsim = "0.11.1"
 strum = { version = "0.28.0", features = ["derive"] }
 tempfile = "3.27.0"
+textwrap = "0.16.2"
 thiserror = "2.0.21"
 
 [workspace.lints.rust]

@@ -11,6 +11,8 @@ use rackctl_core::catalog::{Catalog, Kind, Origin};
 use rackctl_core::config;
 use rackctl_core::kdl_reader::FileError;
 use rackctl_core::rack::{Placement, Rack};
+use textwrap::core::Word;
+use textwrap::{Options, WordSeparator, WordSplitter};
 
 use crate::CONFIG_ERROR;
 use crate::paths::{self, Locations};
@@ -146,34 +148,25 @@ fn row(out: &mut impl Write, indent: &str, label: &str, value: &str) -> io::Resu
     writeln!(out, "{indent}{LABEL}{label:<LABEL_WIDTH$}{LABEL:#}{value}")
 }
 
-/// Writes a labelled, comma-separated list after `lead`, wrapped to [`WIDTH`].
+/// Writes a labelled, comma-separated list after `lead`, wrapped to [`WIDTH`] between items.
 fn list(out: &mut impl Write, label: &str, lead: &str, items: &[String]) -> io::Result<()> {
-    let indent = 2 + LABEL_WIDTH;
-    let mut lines = wrap(lead, items, WIDTH - indent).into_iter();
-    row(out, "  ", label, &lines.next().unwrap_or_default())?;
-    for line in lines {
-        writeln!(out, "{:indent$}{line}", "")?;
+    let value = format!("{lead} {}", items.join(", "));
+    let line = format!("  {LABEL}{label:<LABEL_WIDTH$}{LABEL:#}{}", value.trim());
+    let indent = " ".repeat(2 + LABEL_WIDTH);
+    let options = Options::new(WIDTH)
+        .word_separator(WordSeparator::Custom(after_commas))
+        .word_splitter(WordSplitter::NoHyphenation)
+        .break_words(false)
+        .subsequent_indent(&indent);
+    for line in textwrap::wrap(&line, options) {
+        writeln!(out, "{line}")?;
     }
     Ok(())
 }
 
-/// Joins `lead` and `items` with commas into lines no longer than `width`, breaking only
-/// between items.
-fn wrap(lead: &str, items: &[String], width: usize) -> Vec<String> {
-    let mut lines = vec![lead.to_owned()];
-    for (index, item) in items.iter().enumerate() {
-        let piece = if index + 1 < items.len() { format!("{item},") } else { item.clone() };
-        let line = lines.last_mut().expect("at least one line");
-        if line.is_empty() {
-            line.push_str(&piece);
-        } else if line.len() + 1 + piece.len() <= width {
-            line.push(' ');
-            line.push_str(&piece);
-        } else {
-            lines.push(piece);
-        }
-    }
-    lines
+/// Splits a line into words only after `", "`, so that list items are never broken.
+fn after_commas(line: &str) -> Box<dyn Iterator<Item = Word<'_>> + '_> {
+    Box::new(line.split_inclusive(", ").map(Word::from))
 }
 
 /// Names a kind of device for a count of them, for example `2 switches`.
@@ -204,12 +197,28 @@ fn plural(count: usize, one: &str, many: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Writes a list and returns it without styles.
+    fn plain_list(label: &str, lead: &str, items: &[String]) -> String {
+        let mut out = Vec::new();
+        list(&mut out, label, lead, items).expect("written");
+        let text = String::from_utf8(out).expect("UTF-8");
+        anstream::adapter::strip_str(&text).to_string()
+    }
+
     #[test]
     fn wraps_lists_between_items() {
-        let items: Vec<_> = ["alpha", "beta", "gamma"].map(String::from).into();
-        assert_eq!(wrap("3:", &items, 80), ["3: alpha, beta, gamma"]);
-        assert_eq!(wrap("3:", &items, 14), ["3: alpha,", "beta, gamma"]);
-        assert_eq!(wrap("", &items, 12), ["alpha, beta,", "gamma"]);
+        let items: Vec<_> = (1..=8).map(|n| format!("item number {n}")).collect();
+        assert_eq!(
+            plain_list("things", "8:", &items),
+            "  things   8: item number 1, item number 2, item number 3, item number 4,\n           \
+             item number 5, item number 6, item number 7, item number 8\n"
+        );
+    }
+
+    #[test]
+    fn writes_a_lead_or_items_alone() {
+        assert_eq!(plain_list("devices", "0", &[]), "  devices  0\n");
+        assert_eq!(plain_list("free", "", &["U1-U4".to_owned()]), "  free     U1-U4\n");
     }
 
     #[test]
