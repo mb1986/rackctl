@@ -2,6 +2,8 @@
 
 > Monitor and control rack devices from the command line or a TUI.
 
+[![CI](https://img.shields.io/github/actions/workflow/status/mb1986/rackctl/ci.yml?branch=main&style=for-the-badge&label=CI)](https://github.com/mb1986/rackctl/actions/workflows/ci.yml)
+
 ## What it does
 
 rackctl manages the devices in a server rack: servers, disk shelves, switches, PDUs and UPSs.
