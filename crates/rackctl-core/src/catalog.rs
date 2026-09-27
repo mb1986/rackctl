@@ -1,6 +1,7 @@
 //! Device catalog: hardware models from the built-in catalog, which is embedded in the
 //! program, and from the user's catalog directories.
 
+mod legend;
 mod model;
 
 use std::borrow::Cow;
@@ -13,6 +14,7 @@ use std::sync::OnceLock;
 use miette::SourceSpan;
 use thiserror::Error;
 
+pub use legend::{Align, Direction, Legend, LegendEntry, Numbering, Order, Part, PartKind, State};
 pub use model::{Components, Depth, Ears, Kind, Model, Mount};
 
 use crate::kdl_reader::{FileError, Problem};

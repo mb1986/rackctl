@@ -97,6 +97,15 @@ impl Problem {
     }
 }
 
+/// A value read from a file, with its location there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Spanned<T> {
+    /// The value.
+    pub value: T,
+    /// The location of the value in the file.
+    pub span: SourceSpan,
+}
+
 /// Every problem found in one file, bundled with the file's contents so that each problem
 /// can be displayed in context.
 #[derive(Debug, Error, Diagnostic)]
@@ -110,8 +119,14 @@ pub struct FileError {
 }
 
 impl FileError {
-    /// Creates an error for the file `name`, whose contents are `text`.
-    pub fn new(name: impl Into<String>, text: impl Into<String>, problems: Vec<Problem>) -> Self {
+    /// Creates an error for the file `name`, whose contents are `text`. The problems are put
+    /// in the order they appear in the file.
+    pub fn new(
+        name: impl Into<String>,
+        text: impl Into<String>,
+        mut problems: Vec<Problem>,
+    ) -> Self {
+        problems.sort_by_key(|problem| problem.span.offset());
         let name = name.into();
         Self { src: NamedSource::new(&name, text.into()), name, problems }
     }
@@ -643,6 +658,14 @@ mod tests {
     fn reports_syntax_errors() {
         let problems = parse(r#"device "unterminated"#).expect_err("invalid KDL");
         assert!(!problems.is_empty());
+    }
+
+    #[test]
+    fn lists_problems_in_file_order() {
+        let later = Problem::new("later", SourceSpan::from(10..12));
+        let earlier = Problem::new("earlier", SourceSpan::from(2..4));
+        let error = FileError::new("rack.kdl", "x".repeat(20), vec![later, earlier]);
+        assert_eq!(messages(error.problems()), ["earlier", "later"]);
     }
 
     #[test]

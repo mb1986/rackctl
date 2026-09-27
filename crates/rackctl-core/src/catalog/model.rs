@@ -3,6 +3,7 @@
 use kdl::{KdlDocument, KdlNode};
 use strum::{EnumString, IntoStaticStr, VariantNames};
 
+use super::legend::{Legend, read_legend};
 use crate::kdl_reader::{self, NodeReader, Problem};
 
 /// A hardware model from the catalog, such as a particular server, switch or PDU.
@@ -30,6 +31,8 @@ pub struct Model {
     pub ears: Ears,
     /// How many bays, power supplies, ports and other parts the device has.
     pub components: Components,
+    /// What the characters of the model's faces stand for.
+    pub legend: Legend,
 }
 
 /// The kind of device a model describes. Catalog files write it in kebab-case, for
@@ -175,7 +178,8 @@ fn read_model(id: &str, node: &KdlNode, problems: &mut Vec<Problem>) -> Option<M
     let mut ears = Ears::default();
     let mut components = Components::default();
     let mut has_face = false;
-    let mut legend = None;
+    let mut legend = Legend::default();
+    let mut legend_span = None;
     let mut seen = Vec::new();
 
     for child in block.map(KdlDocument::nodes).unwrap_or_default() {
@@ -216,7 +220,10 @@ fn read_model(id: &str, node: &KdlNode, problems: &mut Vec<Problem>) -> Option<M
             "sfps" => components.sfps = count(child, problems),
             "outlets" => components.outlets = count(child, problems),
             "face" => has_face = true,
-            "legend" => legend = Some(child.name().span()),
+            "legend" => {
+                legend = read_legend(child, problems);
+                legend_span = Some(child.name().span());
+            }
             _ => problems.push(
                 Problem::new(format!("unknown node `{key}` in a model"), child.name().span())
                     .with_suggestion(key, NODES.iter().copied()),
@@ -224,7 +231,7 @@ fn read_model(id: &str, node: &KdlNode, problems: &mut Vec<Problem>) -> Option<M
         }
     }
 
-    if let Some(span) = legend.filter(|_| !has_face) {
+    if let Some(span) = legend_span.filter(|_| !has_face) {
         problems.push(
             Problem::new("a `legend` needs a `face` to describe", span)
                 .with_help("add a `face` or remove the `legend`"),
@@ -252,6 +259,7 @@ fn read_model(id: &str, node: &KdlNode, problems: &mut Vec<Problem>) -> Option<M
         depth,
         ears,
         components,
+        legend,
     })
 }
 
