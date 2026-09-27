@@ -4,9 +4,10 @@
 //! the first one, the helpers in this module collect every problem they find, each pointing
 //! at the exact place in the file, so that all of them can be fixed at once.
 //!
-//! Typical use: parse the text with [`parse`], wrap each node in a [`NodeReader`], read the
-//! values the node should contain and call [`NodeReader::finish`] to report anything
-//! unexpected. [`FileError`] then presents all problems together with the file's contents.
+//! Typical use: parse the text with [`parse_single`], wrap each node in a [`NodeReader`],
+//! read the values the node should contain and call [`NodeReader::finish`] to report
+//! anything unexpected. [`FileError`] then presents all problems together with the file's
+//! contents.
 
 use std::io;
 use std::str::FromStr;
@@ -64,6 +65,19 @@ impl Problem {
         self
     }
 
+    /// Adds a "did you mean" hint when one of `candidates` looks like what `word` meant.
+    #[must_use]
+    pub fn with_suggestion<'c>(
+        self,
+        word: &str,
+        candidates: impl IntoIterator<Item = &'c str>,
+    ) -> Self {
+        match closest(word, candidates) {
+            Some(close) => self.with_help(format!("did you mean `{close}`?")),
+            None => self,
+        }
+    }
+
     /// Returns the description of the problem.
     #[must_use]
     pub fn message(&self) -> &str {
@@ -85,7 +99,7 @@ impl Problem {
 
 /// Every problem found in one file, bundled with the file's contents so that each problem
 /// can be displayed in context.
-#[derive(Debug, Clone, Error, Diagnostic)]
+#[derive(Debug, Error, Diagnostic)]
 #[error("{name}: {}", count(.problems.len()))]
 pub struct FileError {
     name: String,
@@ -165,6 +179,46 @@ pub fn parse(text: &str) -> Result<KdlDocument, Vec<Problem>> {
             })
             .collect()
     })
+}
+
+/// Parses `text`, which must hold a single top-level `name` node, and reads that node with
+/// `read`, which returns `None` when a value it needs is missing or invalid.
+///
+/// # Errors
+///
+/// Returns every problem found in the file.
+pub fn parse_single<T>(
+    text: &str,
+    name: &str,
+    read: impl FnOnce(&KdlNode, &mut Vec<Problem>) -> Option<T>,
+) -> Result<T, Vec<Problem>> {
+    let document = parse(text)?;
+    let mut problems = Vec::new();
+    let mut found = None;
+    for node in document.nodes() {
+        if node.name().value() == name && found.is_none() {
+            found = Some(node);
+        } else {
+            problems.push(
+                Problem::new(
+                    format!("unexpected top-level node `{}`", node.name().value()),
+                    node.name().span(),
+                )
+                .with_help(format!("a {name} file contains a single `{name} {{ ... }}` node")),
+            );
+        }
+    }
+    let Some(node) = found else {
+        problems.push(Problem::new(
+            format!("the file does not contain a `{name} {{ ... }}` node"),
+            SourceSpan::from(0..0),
+        ));
+        return Err(problems);
+    };
+    match read(node, &mut problems) {
+        Some(value) if problems.is_empty() => Ok(value),
+        _ => Err(problems),
+    }
 }
 
 /// Reads the arguments and properties of a single KDL node.
@@ -281,15 +335,12 @@ impl<'n, 'p> NodeReader<'n, 'p> {
             let problem = match entry.name() {
                 Some(name) => {
                     let name = name.value();
-                    let problem = Problem::new(
+                    Problem::new(
                         format!("unknown property `{name}` on `{}`", self.name()),
                         entry.span(),
                     )
-                    .with_label("unknown property");
-                    match closest(name, self.known_properties.iter().map(String::as_str)) {
-                        Some(close) => problem.with_help(format!("did you mean `{close}`?")),
-                        None => problem,
-                    }
+                    .with_label("unknown property")
+                    .with_suggestion(name, self.known_properties.iter().map(String::as_str))
                 }
                 None => {
                     Problem::new(format!("unexpected argument on `{}`", self.name()), entry.span())
@@ -359,7 +410,7 @@ impl<'n, 'p> NodeReader<'n, 'p> {
             .entries()
             .iter()
             .filter_map(KdlEntry::name)
-            .any(|name| name.value() != key && closest(name.value(), [key].into_iter()).is_some())
+            .any(|name| name.value() != key && closest(name.value(), [key]).is_some())
     }
 
     /// Returns the property `key`, or reports that it is missing.
@@ -394,13 +445,11 @@ impl<'n, 'p> NodeReader<'n, 'p> {
             return Some(parsed);
         }
         let choices = format!("`{}`", T::VARIANTS.join("`, `"));
-        let mut problem = Problem::new(
+        let problem = Problem::new(
             format!("`{what}` must be one of {choices}, found `{value}`"),
             entry.span(),
-        );
-        if let Some(close) = closest(&value, T::VARIANTS.iter().copied()) {
-            problem = problem.with_help(format!("did you mean `{close}`?"));
-        }
+        )
+        .with_suggestion(&value, T::VARIANTS.iter().copied());
         self.problems.push(problem);
         None
     }
@@ -434,38 +483,20 @@ fn describe(value: &KdlValue) -> String {
 
 /// Returns the candidate most similar to `word`, if it is similar enough to be a likely
 /// typo. A candidate that differs only in letter case, such as `u` for `U`, always is.
-pub(crate) fn closest<'c>(
-    word: &str,
-    candidates: impl Iterator<Item = &'c str>,
-) -> Option<&'c str> {
+fn closest<'c>(word: &str, candidates: impl IntoIterator<Item = &'c str>) -> Option<&'c str> {
     candidates
+        .into_iter()
         .map(|candidate| {
             let distance = if word.eq_ignore_ascii_case(candidate) {
                 0
             } else {
-                edit_distance(word, candidate)
+                strsim::levenshtein(word, candidate)
             };
             (distance, candidate)
         })
         .filter(|&(distance, candidate)| distance <= 2 && distance < candidate.len())
         .min_by_key(|&(distance, _)| distance)
         .map(|(_, candidate)| candidate)
-}
-
-/// Counts the single-character insertions, deletions and substitutions needed to turn `a`
-/// into `b`, also known as the Levenshtein distance.
-fn edit_distance(a: &str, b: &str) -> usize {
-    let b: Vec<char> = b.chars().collect();
-    let mut previous: Vec<usize> = (0..=b.len()).collect();
-    for (i, ca) in a.chars().enumerate() {
-        let mut current = vec![i + 1];
-        for (j, cb) in b.iter().enumerate() {
-            let substitution = previous[j] + usize::from(ca != *cb);
-            current.push(substitution.min(previous[j + 1] + 1).min(current[j] + 1));
-        }
-        previous = current;
-    }
-    previous[b.len()]
 }
 
 #[cfg(test)]
@@ -635,9 +666,10 @@ mod tests {
     }
 
     #[test]
-    fn measures_edit_distance() {
-        assert_eq!(edit_distance("hieght", "height"), 2);
-        assert_eq!(edit_distance("face", "face"), 0);
-        assert_eq!(edit_distance("", "abc"), 3);
+    fn suggests_only_close_candidates() {
+        assert_eq!(closest("hieght", ["height", "width"]), Some("height"));
+        assert_eq!(closest("U", ["u", "id"]), Some("u"));
+        assert_eq!(closest("colour", ["face", "mount"]), None);
+        assert_eq!(closest("x", ["u"]), None);
     }
 }

@@ -8,6 +8,9 @@ pub mod config;
 pub mod kdl_reader;
 pub mod rack;
 
+#[cfg(test)]
+mod testing;
+
 /// The rule for identifiers, worded to follow the kind of name in error messages, for
 /// example "device ids may only use ...".
 pub(crate) const IDENTIFIER_RULE: &str =

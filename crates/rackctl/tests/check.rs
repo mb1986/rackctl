@@ -6,16 +6,20 @@ use std::process::{Command, Output};
 
 use rackctl_core::catalog::Catalog;
 
-fn check(rack_file: &Path) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_rackctl"))
+/// Returns `rackctl check` without colour and without configuration from the environment.
+fn rackctl_check() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_rackctl"));
+    command
         .arg("check")
-        .arg("-c")
-        .arg(rack_file)
         .env("NO_COLOR", "1")
         .env("HOME", "/nonexistent-home")
-        .env_remove("RACKCTL_CONFIG")
-        .output()
-        .expect("rackctl runs")
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("RACKCTL_CONFIG");
+    command
+}
+
+fn check(rack_file: &Path) -> Output {
+    rackctl_check().arg("-c").arg(rack_file).output().expect("rackctl runs")
 }
 
 fn stdout(output: &Output) -> String {
@@ -97,6 +101,69 @@ fn reports_problems_and_exits_with_code_2() {
     assert!(stdout(&output).ends_with(&format!("rack     {}: 1 problem\n", rack_file.display())));
     assert!(stderr(&output).contains("`b` overlaps `a` on U2"));
     assert_eq!(output.status.code(), Some(2));
+}
+
+#[test]
+fn reports_an_invalid_model_once() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let rack_file = dir.path().join("rack.kdl");
+    fs::create_dir_all(dir.path().join("catalog/lab")).expect("mkdir");
+    fs::write(dir.path().join("catalog/lab/broken.kdl"), r#"model { name "Broken" }"#)
+        .expect("write the model");
+    fs::write(
+        &rack_file,
+        r#"rack "lab" units=4 {
+            device "a" model="lab/broken" u=1
+            device "b" model="lab/broken" u=2
+        }"#,
+    )
+    .expect("write the rack file");
+
+    let output = check(&rack_file);
+    let stderr = stderr(&output);
+    assert_eq!(stderr.matches("the model `lab/broken` has problems").count(), 2);
+    assert_eq!(stderr.matches("the model is missing `kind`").count(), 1);
+    assert_eq!(output.status.code(), Some(2));
+}
+
+#[test]
+fn summarizes_an_empty_rack() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let rack_file = dir.path().join("rack.kdl");
+    fs::write(&rack_file, r#"rack "lab" units=4"#).expect("write the rack file");
+
+    let output = check(&rack_file);
+    assert!(stdout(&output).contains("\n  devices  0\n"));
+    assert_eq!(output.status.code(), Some(0));
+}
+
+#[test]
+fn ignores_an_empty_rackctl_config() {
+    let home = tempfile::tempdir().expect("temporary directory");
+    let rack_dir = home.path().join(".config/rackctl");
+    fs::create_dir_all(&rack_dir).expect("mkdir");
+    fs::write(rack_dir.join("rack.kdl"), r#"rack "home" units=4"#).expect("write the rack file");
+
+    let output = rackctl_check()
+        .env("HOME", home.path())
+        .env("RACKCTL_CONFIG", "")
+        .output()
+        .expect("rackctl runs");
+    assert!(stdout(&output).contains("rack \"home\", 4U"), "stderr: {}", stderr(&output));
+    assert_eq!(output.status.code(), Some(0));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn reports_an_output_that_cannot_be_written() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let rack_file = dir.path().join("rack.kdl");
+    fs::write(&rack_file, r#"rack "lab" units=4"#).expect("write the rack file");
+    let full = fs::File::create("/dev/full").expect("/dev/full");
+
+    let output = rackctl_check().arg("-c").arg(&rack_file).stdout(full).output().expect("runs");
+    assert!(stderr(&output).starts_with("rackctl: cannot write the output: "));
+    assert_eq!(output.status.code(), Some(1));
 }
 
 #[test]

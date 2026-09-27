@@ -4,11 +4,10 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
-use std::ops::RangeInclusive;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use rackctl_core::catalog::{Catalog, Kind, ModelError, Origin};
+use rackctl_core::catalog::{Catalog, Kind, Origin};
 use rackctl_core::config;
 use rackctl_core::kdl_reader::FileError;
 use rackctl_core::rack::{Placement, Rack};
@@ -23,65 +22,61 @@ const WIDTH: usize = 80;
 /// The width of the label column.
 const LABEL_WIDTH: usize = 9;
 
-/// Runs the command. `config` is the rack file named with `-c` or `$RACKCTL_CONFIG`.
+/// Runs the command. `config` is the rack file named with `-c`, if any.
 pub fn run(config: Option<PathBuf>, locations: &Locations) -> ExitCode {
-    check(config, locations).unwrap_or(ExitCode::FAILURE)
+    check(config, locations).unwrap_or_else(|error| {
+        // A closed pipe, as in `rackctl check | head -1`, is not an error.
+        if error.kind() != io::ErrorKind::BrokenPipe {
+            let _ = writeln!(io::stderr(), "rackctl: cannot write the output: {error}");
+        }
+        ExitCode::FAILURE
+    })
 }
 
 fn check(config: Option<PathBuf>, locations: &Locations) -> io::Result<ExitCode> {
+    let mut err = io::stderr();
     let Some(rack_file) = config.or_else(|| locations.rack_file()) else {
-        eprintln!("rackctl: cannot find the configuration because $HOME is not set; use -c FILE");
+        writeln!(
+            err,
+            "rackctl: cannot find the configuration because $HOME is not set; \
+             use -c FILE or set $RACKCTL_CONFIG"
+        )?;
         return Ok(ExitCode::from(CONFIG_ERROR));
     };
     let mut catalog = Catalog::builtin();
     let user_dir = paths::user_catalog(&rack_file);
     if let Err(error) = catalog.add_dirs(&[&user_dir]) {
-        eprintln!("rackctl: cannot read {}: {error}", locations.display(&user_dir));
+        writeln!(err, "rackctl: cannot read {}: {error}", locations.display(&user_dir))?;
         return Ok(ExitCode::from(CONFIG_ERROR));
     }
 
     let mut out = anstream::stdout();
-    let invalid_models = invalid_models(&catalog);
+    let invalid_models = catalog.invalid_models();
     write_catalog(&mut out, &catalog, invalid_models.len())?;
 
-    let rack_name = locations.display(&rack_file);
-    let mut failed = match config::load_rack(&rack_file, &catalog) {
-        Ok(rack) => {
-            row(&mut out, "", "rack", &format!("{rack_name}: {OK}ok{OK:#}"))?;
-            if invalid_models.is_empty() {
-                writeln!(out)?;
-                write_summary(&mut out, &rack, &catalog)?;
-                return Ok(ExitCode::SUCCESS);
-            }
-            Vec::new()
-        }
-        Err(errors) => {
-            // The rack file comes first; the invalid models that follow are reported with
-            // the catalog.
-            let rack_error = errors.into_iter().next().expect("the rack file's problems");
-            let count = problems(rack_error.problems().len());
-            row(&mut out, "", "rack", &format!("{rack_name}: {ERROR}{count}{ERROR:#}"))?;
-            vec![rack_error]
+    let rack = config::load_rack(&rack_file, &catalog);
+    let status = match &rack {
+        Ok(_) => format!("{OK}ok{OK:#}"),
+        Err(error) => {
+            let count = plural(error.problems().len(), "problem", "problems");
+            format!("{ERROR}{count}{ERROR:#}")
         }
     };
+    row(&mut out, "", "rack", &format!("{}: {status}", locations.display(&rack_file)))?;
+    if let Ok(rack) = &rack
+        && invalid_models.is_empty()
+    {
+        writeln!(out)?;
+        write_summary(&mut out, rack, &catalog)?;
+        return Ok(ExitCode::SUCCESS);
+    }
     out.flush()?;
 
-    failed.extend(invalid_models);
-    for report in failed.iter().flat_map(FileError::reports) {
-        eprint!("\n{report:?}");
+    let failed = rack.as_ref().err().into_iter().chain(invalid_models);
+    for report in failed.flat_map(FileError::reports) {
+        write!(err, "\n{report:?}")?;
     }
     Ok(ExitCode::from(CONFIG_ERROR))
-}
-
-/// Loads every model in the catalog and returns the problems of those that are invalid.
-fn invalid_models(catalog: &Catalog) -> Vec<FileError> {
-    catalog
-        .ids()
-        .filter_map(|id| match catalog.model(id) {
-            Err(ModelError::Invalid(error)) => Some(error.clone()),
-            _ => None,
-        })
-        .collect()
 }
 
 fn write_catalog(out: &mut impl Write, catalog: &Catalog, invalid: usize) -> io::Result<()> {
@@ -112,19 +107,21 @@ fn write_summary(out: &mut impl Write, rack: &Rack, catalog: &Catalog) -> io::Re
         .into_iter()
         .map(|(kind, count)| format!("{count} {}", kind_name(kind, count)))
         .collect();
-    list(out, "devices", &format!("{}:", rack.devices.len()), &kinds)?;
+    let count = rack.devices.len();
+    let lead = if count == 0 { "0".to_owned() } else { format!("{count}:") };
+    list(out, "devices", &lead, &kinds)?;
 
     let models = rack.devices.iter().map(|device| device.model.as_str()).collect::<BTreeSet<_>>();
     row(out, "  ", "models", &plural(models.len(), "different model", "different models"))?;
 
     let free = rack.free_units(catalog);
-    let free_count: u16 = free.iter().map(|units| units.end() - units.start() + 1).sum();
+    let free_count: u16 = free.iter().map(|units| units.count()).sum();
     let used = u16::from(rack.units) - free_count;
     row(out, "  ", "space", &format!("{used} of {} U used, {free_count} U free", rack.units))?;
     if free.is_empty() {
         row(out, "  ", "free", "none")?;
     } else {
-        list(out, "free", "", &free.iter().map(describe_units).collect::<Vec<_>>())?;
+        list(out, "free", "", &free.iter().map(ToString::to_string).collect::<Vec<_>>())?;
     }
 
     let strips: Vec<_> = rack
@@ -133,7 +130,7 @@ fn write_summary(out: &mut impl Write, rack: &Rack, catalog: &Catalog) -> io::Re
         .filter_map(|device| {
             let Placement::Strip { side, .. } = device.placement else { return None };
             let model = catalog.model(&device.model).ok()?;
-            let units = describe_units(&device.units(model, rack.units));
+            let units = device.units(model, rack.units);
             let (side, face): (&str, &str) = (side.into(), device.face.into());
             Some(format!("{} ({side}, {face}, {units})", device.id))
         })
@@ -179,15 +176,6 @@ fn wrap(lead: &str, items: &[String], width: usize) -> Vec<String> {
     lines
 }
 
-/// Describes a range of units, for example `U2-U5` or `U7`.
-fn describe_units(units: &RangeInclusive<u16>) -> String {
-    if units.start() == units.end() {
-        format!("U{}", units.start())
-    } else {
-        format!("U{}-U{}", units.start(), units.end())
-    }
-}
-
 /// Names a kind of device for a count of them, for example `2 switches`.
 const fn kind_name(kind: Kind, count: usize) -> &'static str {
     let (one, many) = match kind {
@@ -212,11 +200,6 @@ fn plural(count: usize, one: &str, many: &str) -> String {
     format!("{count} {}", if count == 1 { one } else { many })
 }
 
-/// Formats a number of problems, for example `1 problem` or `3 problems`.
-fn problems(count: usize) -> String {
-    plural(count, "problem", "problems")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,8 +217,6 @@ mod tests {
         assert_eq!(kind_name(Kind::Switch, 2), "switches");
         assert_eq!(kind_name(Kind::Ups, 1), "UPS");
         assert_eq!(plural(1, "model", "models"), "1 model");
-        assert_eq!(problems(3), "3 problems");
-        assert_eq!(describe_units(&(3..=9)), "U3-U9");
-        assert_eq!(describe_units(&(35..=35)), "U35");
+        assert_eq!(plural(3, "problem", "problems"), "3 problems");
     }
 }

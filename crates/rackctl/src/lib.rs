@@ -22,8 +22,13 @@ const CONFIG_ERROR: u8 = 2;
 #[derive(Debug, Parser)]
 #[command(name = "rackctl", version, about)]
 struct Cli {
-    /// The rack file [default: ~/.config/rackctl/rack.kdl]
-    #[arg(short, long, global = true, env = "RACKCTL_CONFIG", value_name = "FILE")]
+    #[arg(
+        short,
+        long,
+        global = true,
+        value_name = "FILE",
+        help = "The rack file [default: $RACKCTL_CONFIG, or ~/.config/rackctl/rack.kdl]"
+    )]
     config: Option<PathBuf>,
 
     #[command(subcommand)]

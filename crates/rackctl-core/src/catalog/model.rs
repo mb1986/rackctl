@@ -1,10 +1,9 @@
 //! Catalog models: descriptions of hardware, one per file.
 
 use kdl::{KdlDocument, KdlNode};
-use miette::SourceSpan;
 use strum::{EnumString, IntoStaticStr, VariantNames};
 
-use crate::kdl_reader::{self, NodeReader, Problem, closest};
+use crate::kdl_reader::{self, NodeReader, Problem};
 
 /// A hardware model from the catalog, such as a particular server, switch or PDU.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,32 +155,7 @@ impl Model {
     ///
     /// Returns every problem found in the file.
     pub fn parse(id: &str, text: &str) -> Result<Self, Vec<Problem>> {
-        let document = kdl_reader::parse(text)?;
-        let mut problems = Vec::new();
-        let mut model_node = None;
-        for node in document.nodes() {
-            if node.name().value() == "model" && model_node.is_none() {
-                model_node = Some(node);
-            } else {
-                let problem = Problem::new(
-                    format!("unexpected top-level node `{}`", node.name().value()),
-                    node.name().span(),
-                )
-                .with_help("a model file contains a single `model { ... }` node");
-                problems.push(problem);
-            }
-        }
-        let Some(node) = model_node else {
-            problems.push(Problem::new(
-                "the file does not contain a `model { ... }` node",
-                SourceSpan::from(0..0),
-            ));
-            return Err(problems);
-        };
-        match read_model(id, node, &mut problems) {
-            Some(model) if problems.is_empty() => Ok(model),
-            _ => Err(problems),
-        }
+        kdl_reader::parse_single(text, "model", |node, problems| read_model(id, node, problems))
     }
 }
 
@@ -243,14 +217,10 @@ fn read_model(id: &str, node: &KdlNode, problems: &mut Vec<Problem>) -> Option<M
             "outlets" => components.outlets = count(child, problems),
             "face" => has_face = true,
             "legend" => legend = Some(child.name().span()),
-            _ => {
-                let mut problem =
-                    Problem::new(format!("unknown node `{key}` in a model"), child.name().span());
-                if let Some(close) = closest(key, NODES.iter().copied()) {
-                    problem = problem.with_help(format!("did you mean `{close}`?"));
-                }
-                problems.push(problem);
-            }
+            _ => problems.push(
+                Problem::new(format!("unknown node `{key}` in a model"), child.name().span())
+                    .with_suggestion(key, NODES.iter().copied()),
+            ),
         }
     }
 

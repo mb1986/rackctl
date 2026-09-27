@@ -1,13 +1,13 @@
 //! Rack layout: the rack, the devices in it and where each device is mounted.
 
-use std::ops::RangeInclusive;
+use std::fmt;
 
 use kdl::{KdlDocument, KdlEntry, KdlNode, NodeKey};
 use miette::SourceSpan;
 use strum::{EnumString, IntoStaticStr, VariantNames};
 
 use crate::catalog::{Catalog, Depth, Model, ModelError, Mount};
-use crate::kdl_reader::{self, NodeReader, Problem, closest};
+use crate::kdl_reader::{self, NodeReader, Problem};
 use crate::{IDENTIFIER_RULE, is_identifier};
 
 /// The largest number of units a rack may have.
@@ -91,6 +91,57 @@ pub enum Face {
     Rear,
 }
 
+/// A range of rack units, displayed as `U2-U5` or `U7`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnitRange {
+    lowest: u16,
+    highest: u16,
+}
+
+impl UnitRange {
+    /// Creates the range between two units, both included, in either order.
+    #[must_use]
+    pub fn new(a: u16, b: u16) -> Self {
+        Self { lowest: a.min(b), highest: a.max(b) }
+    }
+
+    /// Returns the lowest unit of the range.
+    #[must_use]
+    pub const fn lowest(self) -> u16 {
+        self.lowest
+    }
+
+    /// Returns the highest unit of the range.
+    #[must_use]
+    pub const fn highest(self) -> u16 {
+        self.highest
+    }
+
+    /// Returns the number of units in the range.
+    #[must_use]
+    pub const fn count(self) -> u16 {
+        (self.highest - self.lowest).saturating_add(1)
+    }
+
+    /// Returns the units that both ranges cover, if there are any.
+    #[must_use]
+    pub fn shared(self, other: Self) -> Option<Self> {
+        let lowest = self.lowest.max(other.lowest);
+        let highest = self.highest.min(other.highest);
+        (lowest <= highest).then_some(Self::new(lowest, highest))
+    }
+}
+
+impl fmt::Display for UnitRange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.lowest == self.highest {
+            write!(f, "U{}", self.lowest)
+        } else {
+            write!(f, "U{}-U{}", self.lowest, self.highest)
+        }
+    }
+}
+
 /// The nodes a rack may contain, used to suggest corrections for misspelled ones.
 const NODES: &[&str] = &["device"];
 
@@ -101,32 +152,7 @@ impl Rack {
     ///
     /// Returns every problem found in the file.
     pub fn parse(text: &str) -> Result<Self, Vec<Problem>> {
-        let document = kdl_reader::parse(text)?;
-        let mut problems = Vec::new();
-        let mut rack_node = None;
-        for node in document.nodes() {
-            if node.name().value() == "rack" && rack_node.is_none() {
-                rack_node = Some(node);
-            } else {
-                let problem = Problem::new(
-                    format!("unexpected top-level node `{}`", node.name().value()),
-                    node.name().span(),
-                )
-                .with_help("a rack file contains a single `rack { ... }` node");
-                problems.push(problem);
-            }
-        }
-        let Some(node) = rack_node else {
-            problems.push(Problem::new(
-                "the file does not contain a `rack { ... }` node",
-                SourceSpan::from(0..0),
-            ));
-            return Err(problems);
-        };
-        match read_rack(node, &mut problems) {
-            Some(rack) if problems.is_empty() => Ok(rack),
-            _ => Err(problems),
-        }
+        kdl_reader::parse_single(text, "rack", read_rack)
     }
 
     /// Checks the rack against the catalog: every model exists and is valid, strips use
@@ -136,7 +162,7 @@ impl Rack {
     #[must_use]
     pub fn check(&self, catalog: &Catalog) -> Vec<Problem> {
         let mut problems = Vec::new();
-        let mut slots: Vec<(&Device, &Model, RangeInclusive<u16>)> = Vec::new();
+        let mut slots: Vec<(&Device, &Model, UnitRange)> = Vec::new();
         for device in &self.devices {
             let Some(model) = find_model(device, catalog, &mut problems) else { continue };
             if let Some(problem) = mount_mismatch(device, model) {
@@ -144,14 +170,10 @@ impl Rack {
                 continue;
             }
             let units = device.units(model, self.units);
-            if *units.end() > u16::from(self.units) {
+            if units.highest() > u16::from(self.units) {
                 problems.push(
                     Problem::new(
-                        format!(
-                            "`{}` does not fit in the rack: it covers {}",
-                            device.id,
-                            describe_units(&units)
-                        ),
+                        format!("`{}` does not fit in the rack: it covers {units}", device.id),
                         device.spans.placement(),
                     )
                     .with_label(format!("the rack has {} units", self.units)),
@@ -159,10 +181,10 @@ impl Rack {
                 continue;
             }
             if matches!(device.placement, Placement::Slot { .. }) {
-                for (other, other_model, other_units) in &slots {
-                    if let Some(problem) =
-                        overlap((device, model, &units), (other, other_model, other_units))
-                    {
+                for &(other, other_model, other_units) in &slots {
+                    let problem =
+                        overlap((device, model, units), (other, other_model, other_units));
+                    if let Some(problem) = problem {
                         problems.push(problem);
                     }
                 }
@@ -175,17 +197,16 @@ impl Rack {
     /// Returns the ranges of units that no device in the rack's slots covers, from the
     /// bottom of the rack up. Devices whose model is unknown or invalid are left out.
     #[must_use]
-    pub fn free_units(&self, catalog: &Catalog) -> Vec<RangeInclusive<u16>> {
+    pub fn free_units(&self, catalog: &Catalog) -> Vec<UnitRange> {
         let top = u16::from(self.units);
         let mut used = vec![false; usize::from(top) + 1];
         for device in &self.devices {
             if let (Placement::Slot { .. }, Ok(model)) =
                 (device.placement, catalog.model(&device.model))
             {
-                for u in device.units(model, self.units) {
-                    if let Some(unit) = used.get_mut(usize::from(u)) {
-                        *unit = true;
-                    }
+                let units = device.units(model, self.units);
+                for u in units.lowest()..=units.highest().min(top) {
+                    used[usize::from(u)] = true;
                 }
             }
         }
@@ -196,35 +217,36 @@ impl Rack {
             match (used[usize::from(u)], start) {
                 (false, None) => start = Some(u),
                 (true, Some(first)) => {
-                    free.push(first..=u - 1);
+                    free.push(UnitRange::new(first, u - 1));
                     start = None;
                 }
                 _ => {}
             }
         }
         if let Some(first) = start {
-            free.push(first..=top);
+            free.push(UnitRange::new(first, top));
         }
         free
     }
 }
 
 impl Device {
-    /// Returns the units the device covers, from the lowest to the highest, given its
-    /// catalog model and the height of the rack.
+    /// Returns the units the device covers, given its catalog model and the height of the
+    /// rack.
     ///
     /// A model without a height is one unit high, except for a strip, which then reaches
     /// the top of the rack.
     #[must_use]
-    pub fn units(&self, model: &Model, rack_units: u8) -> RangeInclusive<u16> {
+    pub fn units(&self, model: &Model, rack_units: u8) -> UnitRange {
         let (u, height) = match self.placement {
-            Placement::Slot { u } => (u, model.height.unwrap_or(1)),
+            Placement::Slot { u } => (u16::from(u), model.height.map_or(1, u16::from)),
             Placement::Strip { u, .. } => {
-                (u, model.height.unwrap_or_else(|| rack_units.saturating_sub(u) + 1))
+                let u = u16::from(u);
+                let rest = (u16::from(rack_units) + 1).saturating_sub(u);
+                (u, model.height.map_or(rest, u16::from))
             }
         };
-        let u = u16::from(u);
-        u..=u + u16::from(height) - 1
+        UnitRange::new(u, (u + height).saturating_sub(1).max(u))
     }
 }
 
@@ -236,14 +258,10 @@ fn find_model<'c>(
 ) -> Option<&'c Model> {
     let problem = match catalog.model(&device.model) {
         Ok(model) => return Some(model),
-        Err(ModelError::Unknown { suggestion, .. }) => {
-            let problem =
-                Problem::new(format!("unknown model `{}`", device.model), device.spans.model)
-                    .with_label("not in the catalog");
-            match suggestion {
-                Some(close) => problem.with_help(format!("did you mean `{close}`?")),
-                None => problem,
-            }
+        Err(ModelError::Unknown { .. }) => {
+            Problem::new(format!("unknown model `{}`", device.model), device.spans.model)
+                .with_label("not in the catalog")
+                .with_suggestion(&device.model, catalog.ids())
         }
         Err(ModelError::Invalid(_)) => {
             Problem::new(format!("the model `{}` has problems", device.model), device.spans.model)
@@ -284,26 +302,20 @@ fn mount_mismatch(device: &Device, model: &Model) -> Option<Problem> {
 /// Reports two rack devices that share a unit. They may share it only when one is on the
 /// front, the other on the rear, and both are half depth.
 fn overlap(
-    (device, model, units): (&Device, &Model, &RangeInclusive<u16>),
-    (other, other_model, other_units): (&Device, &Model, &RangeInclusive<u16>),
+    (device, model, units): (&Device, &Model, UnitRange),
+    (other, other_model, other_units): (&Device, &Model, UnitRange),
 ) -> Option<Problem> {
-    let shared = *units.start().max(other_units.start())..=*units.end().min(other_units.end());
-    if shared.is_empty() {
-        return None;
-    }
+    let shared = units.shared(other_units)?;
     let half = model.depth == Depth::Half && other_model.depth == Depth::Half;
     if device.face != other.face && half {
         return None;
     }
     let problem = Problem::new(
-        format!("`{}` overlaps `{}` on {}", device.id, other.id, describe_units(&shared)),
+        format!("`{}` overlaps `{}` on {shared}", device.id, other.id),
         device.spans.placement(),
     )
-    .with_label(format!("`{}` covers {}", device.id, describe_units(units)))
-    .with_label_at(
-        other.spans.placement(),
-        format!("`{}` covers {}", other.id, describe_units(other_units)),
-    );
+    .with_label(format!("`{}` covers {units}", device.id))
+    .with_label_at(other.spans.placement(), format!("`{}` covers {other_units}", other.id));
     Some(if device.face == other.face {
         problem
     } else {
@@ -312,15 +324,6 @@ fn overlap(
              `depth \"half\"`",
         )
     })
-}
-
-/// Describes a range of units, for example `U2-U5` or `U7`.
-fn describe_units(units: &RangeInclusive<u16>) -> String {
-    if units.start() == units.end() {
-        format!("U{}", units.start())
-    } else {
-        format!("U{}-U{}", units.start(), units.end())
-    }
 }
 
 /// Reads the `rack { ... }` node. Returns `None` when a required value is missing.
@@ -350,12 +353,10 @@ fn read_rack(node: &KdlNode, problems: &mut Vec<Problem>) -> Option<Rack> {
     for child in block.map(KdlDocument::nodes).unwrap_or_default() {
         let key = child.name().value();
         if key != "device" {
-            let mut problem =
-                Problem::new(format!("unknown node `{key}` in a rack"), child.name().span());
-            if let Some(close) = closest(key, NODES.iter().copied()) {
-                problem = problem.with_help(format!("did you mean `{close}`?"));
-            }
-            problems.push(problem);
+            problems.push(
+                Problem::new(format!("unknown node `{key}` in a rack"), child.name().span())
+                    .with_suggestion(key, NODES.iter().copied()),
+            );
             continue;
         }
         // Ids are compared even for devices with other problems, so that a repeated id is
@@ -371,7 +372,9 @@ fn read_rack(node: &KdlNode, problems: &mut Vec<Problem>) -> Option<Rack> {
             }
             ids.push((id, span));
         }
-        devices.extend(read_device(child, units, problems));
+        if let Some(device) = read_device(child, units, problems) {
+            devices.push(device);
+        }
     }
 
     Some(Rack { name: name?, units: units?, devices })
@@ -435,11 +438,10 @@ fn entry_span(node: &KdlNode, key: impl Into<NodeKey>) -> SourceSpan {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-
     use miette::Diagnostic;
 
     use super::*;
+    use crate::testing::dir_with;
 
     fn messages(text: &str) -> Vec<String> {
         Rack::parse(text)
@@ -449,25 +451,20 @@ mod tests {
             .collect()
     }
 
-    /// Models available to [`check`], as identifier and file contents.
+    /// Models available to [`check`], as file path and contents.
     const MODELS: &[(&str, &str)] = &[
-        ("x/server", r#"model { name "1U server"; kind "server" }"#),
-        ("x/server-5u", r#"model { name "5U server"; kind "server"; height 5 }"#),
-        ("x/switch", r#"model { name "Switch"; kind "switch"; depth "half" }"#),
-        ("x/panel", r#"model { name "Panel"; kind "patch-panel"; depth "half" }"#),
-        ("x/strip", r#"model { name "Strip"; kind "pdu"; mount "side"; height 20 }"#),
-        ("x/strip-full", r#"model { name "Full strip"; kind "pdu"; mount "side" }"#),
-        ("x/broken", r#"model { name "Broken" }"#),
+        ("x/server.kdl", r#"model { name "1U server"; kind "server" }"#),
+        ("x/server-5u.kdl", r#"model { name "5U server"; kind "server"; height 5 }"#),
+        ("x/switch.kdl", r#"model { name "Switch"; kind "switch"; depth "half" }"#),
+        ("x/panel.kdl", r#"model { name "Panel"; kind "patch-panel"; depth "half" }"#),
+        ("x/strip.kdl", r#"model { name "Strip"; kind "pdu"; mount "side"; height 20 }"#),
+        ("x/strip-full.kdl", r#"model { name "Full strip"; kind "pdu"; mount "side" }"#),
+        ("x/broken.kdl", r#"model { name "Broken" }"#),
     ];
 
     /// Returns a catalog of [`MODELS`], with the directory holding their files.
     fn test_catalog() -> (tempfile::TempDir, Catalog) {
-        let dir = tempfile::tempdir().expect("temporary directory");
-        for (id, text) in MODELS {
-            let path = dir.path().join(format!("{id}.kdl"));
-            fs::create_dir_all(path.parent().expect("file inside the directory")).expect("mkdir");
-            fs::write(path, text).expect("write file");
-        }
+        let dir = dir_with(MODELS);
         let catalog = Catalog::open(&[dir.path()]).expect("readable catalog");
         (dir, catalog)
     }
@@ -569,7 +566,7 @@ mod tests {
             }"#,
         )
         .expect("valid rack");
-        assert_eq!(rack.free_units(&catalog), [6..=7, 9..=12]);
+        assert_eq!(rack.free_units(&catalog), [UnitRange::new(6, 7), UnitRange::new(9, 12)]);
     }
 
     #[test]
@@ -590,8 +587,25 @@ mod tests {
                 mount: None,
             },
         };
-        assert_eq!(device(Placement::Slot { u: 28 }).units(&server, 36), 28..=29);
-        assert_eq!(device(Placement::Strip { side: Side::Left, u: 19 }).units(&strip, 36), 19..=36);
+        assert_eq!(device(Placement::Slot { u: 28 }).units(&server, 36), UnitRange::new(28, 29));
+        let strip_units = device(Placement::Strip { side: Side::Left, u: 19 }).units(&strip, 36);
+        assert_eq!(strip_units, UnitRange::new(19, 36));
+        // Values the parser never produces must not overflow.
+        assert_eq!(
+            device(Placement::Strip { side: Side::Left, u: 0 }).units(&strip, 255).highest(),
+            255
+        );
+    }
+
+    #[test]
+    fn describes_unit_ranges() {
+        assert_eq!(UnitRange::new(3, 9).to_string(), "U3-U9");
+        assert_eq!(UnitRange::new(35, 35).to_string(), "U35");
+        assert_eq!(UnitRange::new(9, 3), UnitRange::new(3, 9));
+        assert_eq!(UnitRange::new(0, u16::MAX).count(), u16::MAX);
+        assert_eq!(UnitRange::new(3, 9).count(), 7);
+        assert_eq!(UnitRange::new(1, 5).shared(UnitRange::new(2, 6)), Some(UnitRange::new(2, 5)));
+        assert_eq!(UnitRange::new(1, 5).shared(UnitRange::new(6, 6)), None);
     }
 
     #[test]

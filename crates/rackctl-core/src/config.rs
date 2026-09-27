@@ -3,59 +3,39 @@
 use std::fs;
 use std::path::Path;
 
-use crate::catalog::{Catalog, ModelError};
+use crate::catalog::Catalog;
 use crate::kdl_reader::FileError;
 use crate::rack::Rack;
 
 /// Loads the rack file at `path` and checks it against `catalog`.
 ///
+/// Problems in model files are reported by [`Catalog::invalid_models`].
+///
 /// # Errors
 ///
-/// Returns one [`FileError`] for each file with problems: the rack file first, followed by
-/// the files of any invalid models it uses.
-pub fn load_rack(path: &Path, catalog: &Catalog) -> Result<Rack, Vec<FileError>> {
+/// Returns the problems found in the rack file.
+pub fn load_rack(path: &Path, catalog: &Catalog) -> Result<Rack, FileError> {
     let name = path.display().to_string();
-    let text =
-        fs::read_to_string(path).map_err(|error| vec![FileError::unreadable(&name, &error)])?;
-    let rack =
-        Rack::parse(&text).map_err(|problems| vec![FileError::new(&name, &text, problems)])?;
+    let text = fs::read_to_string(path).map_err(|error| FileError::unreadable(&name, &error))?;
+    let rack = Rack::parse(&text).map_err(|problems| FileError::new(&name, &text, problems))?;
     let problems = rack.check(catalog);
-    if problems.is_empty() {
-        return Ok(rack);
-    }
-
-    let mut errors = vec![FileError::new(name, text, problems)];
-    let mut reported = Vec::new();
-    for device in &rack.devices {
-        if let Err(ModelError::Invalid(error)) = catalog.model(&device.model)
-            && !reported.contains(&&device.model)
-        {
-            reported.push(&device.model);
-            errors.push(error.clone());
-        }
-    }
-    Err(errors)
+    if problems.is_empty() { Ok(rack) } else { Err(FileError::new(name, text, problems)) }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kdl_reader::Problem;
+    use crate::testing::dir_with;
 
-    fn write(dir: &Path, path: &str, text: &str) {
-        let path = dir.join(path);
-        fs::create_dir_all(path.parent().expect("file inside the directory")).expect("mkdir");
-        fs::write(path, text).expect("write file");
-    }
-
-    fn names(errors: &[FileError]) -> Vec<String> {
-        errors.iter().map(ToString::to_string).collect()
-    }
+    const SERVER: &str = r#"model { name "Server"; kind "server" }"#;
 
     #[test]
     fn loads_a_valid_rack() {
-        let dir = tempfile::tempdir().expect("temporary directory");
-        write(dir.path(), "catalog/x/server.kdl", r#"model { name "Server"; kind "server" }"#);
-        write(dir.path(), "rack.kdl", r#"rack "r" units=4 { device "a" model="x/server" u=1 }"#);
+        let dir = dir_with(&[
+            ("catalog/x/server.kdl", SERVER),
+            ("rack.kdl", r#"rack "r" units=4 { device "a" model="x/server" u=1 }"#),
+        ]);
         let catalog = Catalog::open(&[dir.path().join("catalog")]).expect("readable catalog");
 
         let rack = load_rack(&dir.path().join("rack.kdl"), &catalog).expect("valid rack");
@@ -63,30 +43,30 @@ mod tests {
     }
 
     #[test]
-    fn reports_the_rack_and_each_invalid_model_once() {
-        let dir = tempfile::tempdir().expect("temporary directory");
-        write(dir.path(), "catalog/x/broken.kdl", r#"model { name "Broken" }"#);
-        write(
-            dir.path(),
-            "rack.kdl",
-            r#"rack "r" units=4 {
-                device "a" model="x/broken" u=1
-                device "b" model="x/broken" u=2
-            }"#,
-        );
+    fn reports_the_problems_of_the_rack_file() {
+        let dir = dir_with(&[
+            ("catalog/x/server.kdl", SERVER),
+            ("catalog/x/broken.kdl", r#"model { name "Broken" }"#),
+            (
+                "rack.kdl",
+                r#"rack "r" units=4 {
+                    device "a" model="x/broken" u=1
+                    device "b" model="x/server" u=1
+                }"#,
+            ),
+        ]);
         let catalog = Catalog::open(&[dir.path().join("catalog")]).expect("readable catalog");
 
-        let errors = load_rack(&dir.path().join("rack.kdl"), &catalog).expect_err("invalid");
-        let rack = dir.path().join("rack.kdl").display().to_string();
-        let model = dir.path().join("catalog/x/broken.kdl").display().to_string();
-        assert_eq!(names(&errors), [format!("{rack}: 2 problems"), format!("{model}: 1 problem")]);
+        let error = load_rack(&dir.path().join("rack.kdl"), &catalog).expect_err("invalid");
+        let messages: Vec<_> = error.problems().iter().map(Problem::message).collect();
+        assert_eq!(messages, ["the model `x/broken` has problems"]);
     }
 
     #[test]
     fn reports_a_missing_file() {
-        let dir = tempfile::tempdir().expect("temporary directory");
-        let errors =
+        let dir = dir_with(&[]);
+        let error =
             load_rack(&dir.path().join("rack.kdl"), &Catalog::default()).expect_err("missing");
-        assert!(errors[0].problems()[0].message().starts_with("cannot read the file: "));
+        assert!(error.problems()[0].message().starts_with("cannot read the file: "));
     }
 }

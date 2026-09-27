@@ -2,8 +2,8 @@
 //!
 //! The configuration directory is `$XDG_CONFIG_HOME/rackctl`, or `~/.config/rackctl` when
 //! `$XDG_CONFIG_HOME` is not set. It holds the rack file, `rack.kdl`, and the user's own
-//! models in `catalog/`. The `-c` option and `$RACKCTL_CONFIG` name a different rack file;
-//! the command-line parser handles them.
+//! models in `catalog/`. `$RACKCTL_CONFIG` names a different rack file, and the `-c` option,
+//! handled by the command-line parser, overrides both.
 
 use std::env;
 use std::ffi::OsString;
@@ -14,20 +14,33 @@ use std::path::{Path, PathBuf};
 pub struct Locations {
     home: Option<PathBuf>,
     config_home: Option<PathBuf>,
+    rack_config: Option<PathBuf>,
 }
 
 impl Locations {
-    /// Reads `$HOME` and `$XDG_CONFIG_HOME` from the environment of the process.
+    /// Reads `$HOME`, `$XDG_CONFIG_HOME` and `$RACKCTL_CONFIG`.
     pub fn from_env() -> Self {
-        Self::new(env::var_os("HOME"), env::var_os("XDG_CONFIG_HOME"))
+        Self::new(
+            env::var_os("HOME"),
+            env::var_os("XDG_CONFIG_HOME"),
+            env::var_os("RACKCTL_CONFIG"),
+        )
     }
 
-    /// Creates locations from the values of `$HOME` and `$XDG_CONFIG_HOME`. Values that are
-    /// empty or not absolute paths are ignored, as the XDG specification requires.
-    pub fn new(home: Option<OsString>, config_home: Option<OsString>) -> Self {
+    /// Creates locations from the values of the three variables. Empty values are ignored,
+    /// and so are relative directories, as the XDG specification requires.
+    pub fn new(
+        home: Option<OsString>,
+        config_home: Option<OsString>,
+        rack_config: Option<OsString>,
+    ) -> Self {
         let absolute =
             |value: Option<OsString>| value.map(PathBuf::from).filter(|path| path.is_absolute());
-        Self { home: absolute(home), config_home: absolute(config_home) }
+        Self {
+            home: absolute(home),
+            config_home: absolute(config_home),
+            rack_config: rack_config.filter(|value| !value.is_empty()).map(PathBuf::from),
+        }
     }
 
     /// Returns rackctl's configuration directory, or `None` when neither variable is set.
@@ -37,9 +50,10 @@ impl Locations {
         Some(base.join("rackctl"))
     }
 
-    /// Returns the default rack file, `rack.kdl` in the configuration directory.
+    /// Returns the rack file to use when `-c` is not given: `$RACKCTL_CONFIG`, or
+    /// `rack.kdl` in the configuration directory.
     pub fn rack_file(&self) -> Option<PathBuf> {
-        self.config_dir().map(|dir| dir.join("rack.kdl"))
+        self.rack_config.clone().or_else(|| Some(self.config_dir()?.join("rack.kdl")))
     }
 
     /// Formats `path` for display, writing the home directory as `~`.
@@ -61,7 +75,17 @@ mod tests {
     use super::*;
 
     fn locations(home: Option<&str>, config_home: Option<&str>) -> Locations {
-        Locations::new(home.map(OsString::from), config_home.map(OsString::from))
+        Locations::new(home.map(OsString::from), config_home.map(OsString::from), None)
+    }
+
+    #[test]
+    fn uses_rackctl_config_when_it_is_not_empty() {
+        let with = |value: &str| {
+            Locations::new(Some("/home/u".into()), None, Some(value.into())).rack_file()
+        };
+        assert_eq!(with("/srv/rack.kdl"), Some(PathBuf::from("/srv/rack.kdl")));
+        assert_eq!(with("rack.kdl"), Some(PathBuf::from("rack.kdl")));
+        assert_eq!(with(""), Some(PathBuf::from("/home/u/.config/rackctl/rack.kdl")));
     }
 
     #[test]

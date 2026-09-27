@@ -15,7 +15,7 @@ use thiserror::Error;
 
 pub use model::{Components, Depth, Ears, Kind, Model, Mount};
 
-use crate::kdl_reader::{FileError, Problem, closest};
+use crate::kdl_reader::{FileError, Problem};
 use crate::{IDENTIFIER_RULE, is_identifier};
 
 /// The device catalog: every hardware model available to the racks.
@@ -76,8 +76,6 @@ pub enum ModelError<'a> {
     Unknown {
         /// The identifier that was requested.
         id: String,
-        /// The most similar identifier in the catalog, if there is one.
-        suggestion: Option<String>,
     },
     /// The model's file exists but contains problems.
     #[error(transparent)]
@@ -149,10 +147,20 @@ impl Catalog {
     /// [`ModelError::Invalid`] if the model's file contains problems.
     pub fn model(&self, id: &str) -> Result<&Model, ModelError<'_>> {
         let Some(entry) = self.entries.get(id) else {
-            let suggestion = closest(id, self.ids()).map(str::to_owned);
-            return Err(ModelError::Unknown { id: id.to_owned(), suggestion });
+            return Err(ModelError::Unknown { id: id.to_owned() });
         };
         entry.model.get_or_init(|| load(id, &entry.source)).as_ref().map_err(ModelError::Invalid)
+    }
+
+    /// Reads every model and returns the problems of the invalid ones.
+    #[must_use]
+    pub fn invalid_models(&self) -> Vec<&FileError> {
+        self.ids()
+            .filter_map(|id| match self.model(id) {
+                Err(ModelError::Invalid(error)) => Some(error),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Adds a model, replacing any model with the same identifier. A model whose identifier
@@ -242,19 +250,9 @@ fn load(id: &str, source: &Source) -> Result<Model, FileError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::dir_with;
 
     const R630: &str = r#"model { name "Dell PowerEdge R630"; short "R630"; kind "server" }"#;
-
-    /// Creates a directory holding the given files, each written with its contents.
-    fn dir_with(files: &[(&str, &str)]) -> tempfile::TempDir {
-        let dir = tempfile::tempdir().expect("temporary directory");
-        for (path, text) in files {
-            let path = dir.path().join(path);
-            fs::create_dir_all(path.parent().expect("file inside the directory")).expect("mkdir");
-            fs::write(path, text).expect("write file");
-        }
-        dir
-    }
 
     #[test]
     fn lists_models_and_loads_them_on_request() {
@@ -341,14 +339,12 @@ mod tests {
     }
 
     #[test]
-    fn suggests_a_similar_identifier() {
+    fn reports_an_unknown_model() {
         let dir = dir_with(&[("dell/r630-sff8.kdl", R630)]);
         let catalog = Catalog::open(&[dir.path()]).expect("readable directory");
 
         match catalog.model("dell/r630-sf8") {
-            Err(ModelError::Unknown { suggestion, .. }) => {
-                assert_eq!(suggestion.as_deref(), Some("dell/r630-sff8"));
-            }
+            Err(ModelError::Unknown { id }) => assert_eq!(id, "dell/r630-sf8"),
             other => panic!("expected an unknown model, got {other:?}"),
         }
     }
