@@ -34,8 +34,20 @@ pub struct Model {
 }
 
 /// The kind of device a model describes. Catalog files write it in kebab-case, for
-/// example `patch-panel`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumString, IntoStaticStr, VariantNames)]
+/// example `patch-panel`. Kinds are ordered as declared.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    EnumString,
+    IntoStaticStr,
+    VariantNames,
+)]
 #[strum(serialize_all = "kebab-case")]
 pub enum Kind {
     Server,

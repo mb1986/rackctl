@@ -160,6 +160,42 @@ impl Rack {
         }
         problems
     }
+
+    /// Returns the ranges of units that no device in the rack's slots covers, from the
+    /// bottom of the rack up. Devices whose model is unknown or invalid are left out.
+    #[must_use]
+    pub fn free_units(&self, catalog: &Catalog) -> Vec<RangeInclusive<u16>> {
+        let top = u16::from(self.units);
+        let mut used = vec![false; usize::from(top) + 1];
+        for device in &self.devices {
+            if let (Placement::Slot { .. }, Ok(model)) =
+                (device.placement, catalog.model(&device.model))
+            {
+                for u in device.units(model, self.units) {
+                    if let Some(unit) = used.get_mut(usize::from(u)) {
+                        *unit = true;
+                    }
+                }
+            }
+        }
+
+        let mut free = Vec::new();
+        let mut start = None;
+        for u in 1..=top {
+            match (used[usize::from(u)], start) {
+                (false, None) => start = Some(u),
+                (true, Some(first)) => {
+                    free.push(first..=u - 1);
+                    start = None;
+                }
+                _ => {}
+            }
+        }
+        if let Some(first) = start {
+            free.push(first..=top);
+        }
+        free
+    }
 }
 
 impl Device {
@@ -407,8 +443,8 @@ mod tests {
         ("x/broken", r#"model { name "Broken" }"#),
     ];
 
-    /// Places `devices` in a 36-unit rack and checks it against [`MODELS`].
-    fn check(devices: &str) -> Vec<Problem> {
+    /// Returns a catalog of [`MODELS`], with the directory holding their files.
+    fn test_catalog() -> (tempfile::TempDir, Catalog) {
         let dir = tempfile::tempdir().expect("temporary directory");
         for (id, text) in MODELS {
             let path = dir.path().join(format!("{id}.kdl"));
@@ -416,6 +452,12 @@ mod tests {
             fs::write(path, text).expect("write file");
         }
         let catalog = Catalog::open(&[dir.path()]).expect("readable catalog");
+        (dir, catalog)
+    }
+
+    /// Places `devices` in a 36-unit rack and checks it against [`MODELS`].
+    fn check(devices: &str) -> Vec<Problem> {
+        let (_dir, catalog) = test_catalog();
         let rack =
             Rack::parse(&format!("rack \"r\" units=36 {{\n{devices}\n}}")).expect("valid rack");
         rack.check(&catalog)
@@ -496,6 +538,21 @@ mod tests {
             check_messages(r#"device "pdu" model="x/strip" mount="left" u=20"#),
             ["`pdu` does not fit in the rack: it covers U20-U39"]
         );
+    }
+
+    #[test]
+    fn finds_the_free_units() {
+        let (_dir, catalog) = test_catalog();
+        let rack = Rack::parse(
+            r#"rack "r" units=12 {
+                device "a" model="x/server-5u" u=1
+                device "b" model="x/switch" u=8
+                device "c" model="x/panel" u=8 face="rear"
+                device "pdu" model="x/strip-full" mount="left"
+            }"#,
+        )
+        .expect("valid rack");
+        assert_eq!(rack.free_units(&catalog), [6..=7, 9..=12]);
     }
 
     #[test]

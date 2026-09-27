@@ -12,7 +12,7 @@ use std::io;
 use std::str::FromStr;
 
 use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
-use miette::{Diagnostic, LabeledSpan, NamedSource, SourceSpan};
+use miette::{Diagnostic, LabeledSpan, NamedSource, Report, SourceSpan};
 use strum::VariantNames;
 use thiserror::Error;
 
@@ -113,6 +113,27 @@ impl FileError {
     #[must_use]
     pub fn problems(&self) -> &[Problem] {
         &self.problems
+    }
+
+    /// Returns one report per problem, each showing the problem in the file's text. When the
+    /// text is not available, for example because the file cannot be read, the report names
+    /// the file instead.
+    #[must_use]
+    pub fn reports(&self) -> Vec<Report> {
+        self.problems
+            .iter()
+            .map(|problem| {
+                if self.src.inner().is_empty() {
+                    let problem = Problem {
+                        message: format!("{}: {}", self.name, problem.message),
+                        ..problem.clone()
+                    };
+                    Report::new(problem)
+                } else {
+                    Report::new(problem.clone()).with_source_code(self.src.clone())
+                }
+            })
+            .collect()
     }
 }
 
