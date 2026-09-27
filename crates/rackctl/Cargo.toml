@@ -21,6 +21,7 @@ miette = { workspace = true, features = ["fancy-no-backtrace"] }
 textwrap.workspace = true
 
 [dev-dependencies]
+indoc.workspace = true
 tempfile.workspace = true
 
 [lints]

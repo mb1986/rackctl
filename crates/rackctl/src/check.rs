@@ -209,9 +209,11 @@ mod tests {
     fn wraps_lists_between_items() {
         let items: Vec<_> = (1..=8).map(|n| format!("item number {n}")).collect();
         assert_eq!(
-            plain_list("things", "8:", &items),
-            "  things   8: item number 1, item number 2, item number 3, item number 4,\n           \
-             item number 5, item number 6, item number 7, item number 8\n"
+            plain_list("things", "8:", &items).lines().collect::<Vec<_>>(),
+            [
+                "  things   8: item number 1, item number 2, item number 3, item number 4,",
+                "           item number 5, item number 6, item number 7, item number 8",
+            ]
         );
     }
 

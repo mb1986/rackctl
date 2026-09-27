@@ -4,6 +4,7 @@ use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
 
+use indoc::formatdoc;
 use rackctl_core::catalog::Catalog;
 
 /// Returns `rackctl check` without colour and without configuration from the environment.
@@ -46,18 +47,19 @@ fn summarizes_a_valid_rack() {
 
     let output = check(&rack_file);
     let models = Catalog::builtin().ids().count();
-    let expected = format!(
-        "catalog  {models} models, all valid ({models} built-in, 0 user)\n\
-         rack     {}: ok\n\
-         \n\
-         rack \"lab\", 12U\n\
-         \x20 devices  3: 1 server, 1 switch, 1 PDU\n\
-         \x20 models   3 different models\n\
-         \x20 space    3 of 12 U used, 9 U free\n\
-         \x20 free     U3-U11\n\
-         \x20 strips   pdu (left, front, U3-U12)\n",
-        rack_file.display()
-    );
+    let expected = formatdoc! {r#"
+        catalog  {models} models, all valid ({models} built-in, 0 user)
+        rack     {rack_file}: ok
+
+        rack "lab", 12U
+          devices  3: 1 server, 1 switch, 1 PDU
+          models   3 different models
+          space    3 of 12 U used, 9 U free
+          free     U3-U11
+          strips   pdu (left, front, U3-U12)
+        "#,
+        rack_file = rack_file.display(),
+    };
     assert_eq!(stdout(&output), expected);
     assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
 }
