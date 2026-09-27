@@ -11,6 +11,7 @@
 
 use std::io;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 use miette::{Diagnostic, LabeledSpan, NamedSource, Report, SourceSpan};
@@ -107,13 +108,13 @@ pub struct Spanned<T> {
 }
 
 /// Every problem found in one file, bundled with the file's contents so that each problem
-/// can be displayed in context.
+/// can be displayed in context. The contents are shared by all the reports made from it.
 #[derive(Debug, Error, Diagnostic)]
 #[error("{name}: {}", count(.problems.len()))]
 pub struct FileError {
     name: String,
     #[source_code]
-    src: NamedSource<String>,
+    src: NamedSource<Arc<str>>,
     #[related]
     problems: Vec<Problem>,
 }
@@ -128,7 +129,7 @@ impl FileError {
     ) -> Self {
         problems.sort_by_key(|problem| problem.span.offset());
         let name = name.into();
-        Self { src: NamedSource::new(&name, text.into()), name, problems }
+        Self { src: NamedSource::new(&name, Arc::from(text.into())), name, problems }
     }
 
     /// Creates an error for the file `name`, which could not be read.

@@ -9,21 +9,44 @@ use strum::{EnumString, IntoStaticStr, VariantNames};
 use crate::kdl_reader::{NodeReader, Problem, Spanned};
 
 /// The legend of a model's faces: one entry per key character.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Legend {
     entries: Vec<LegendEntry>,
+    /// The position in `entries` of each key's entry, indexed by the key's ASCII code, so
+    /// that looking up a picture's characters takes constant time.
+    index: [Option<u8>; 128],
+}
+
+impl Default for Legend {
+    fn default() -> Self {
+        Self { entries: Vec::new(), index: [None; 128] }
+    }
 }
 
 impl Legend {
     /// Returns the entry for `key`, if the legend has one.
     #[must_use]
     pub fn get(&self, key: char) -> Option<&LegendEntry> {
-        self.entries.iter().find(|entry| entry.key == key)
+        let code = u8::try_from(key).ok()?;
+        let position = (*self.index.get(usize::from(code))?)?;
+        self.entries.get(usize::from(position))
     }
 
     /// Returns the entries in the order they are written.
     pub fn entries(&self) -> impl Iterator<Item = &LegendEntry> {
         self.entries.iter()
+    }
+
+    /// Adds an entry whose key is ASCII and not yet in the legend.
+    fn push(&mut self, entry: LegendEntry) {
+        let (Ok(code), Ok(position)) = (u8::try_from(entry.key), u8::try_from(self.entries.len()))
+        else {
+            return;
+        };
+        if let Some(slot) = self.index.get_mut(usize::from(code)) {
+            *slot = Some(position);
+            self.entries.push(entry);
+        }
     }
 }
 
@@ -261,7 +284,7 @@ pub fn read_legend(node: &KdlNode, problems: &mut Vec<Problem>) -> Legend {
         }
         keys.push((key, span));
         if let Some(entry) = read_entry(child, key, problems) {
-            legend.entries.push(entry);
+            legend.push(entry);
         }
     }
     legend
@@ -637,6 +660,19 @@ mod tests {
         assert_eq!(entry(r#"s sfp="▬""#).part, Part::Sfp);
         assert_eq!(entry(r#"s port="▬" media="sfp""#).part, Part::Sfp);
         assert_eq!(entry(r#"n port media="rj45""#).part, Part::Port);
+    }
+
+    #[test]
+    fn finds_entries_by_key() {
+        let (legend, problems) = parse(r#"p power; b bay; ~ fill; t text="APC""#);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(legend.get('b').map(|entry| entry.part), Some(Part::Bay));
+        assert_eq!(legend.get('~').map(|entry| entry.part), Some(Part::Fill));
+        assert_eq!(legend.get('t').and_then(|entry| entry.text.as_deref()), Some("APC"));
+        assert!(legend.get('x').is_none());
+        assert!(legend.get('é').is_none());
+        let keys: String = legend.entries().map(|entry| entry.key).collect();
+        assert_eq!(keys, "pb~t");
     }
 
     #[test]

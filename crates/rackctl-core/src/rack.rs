@@ -1,5 +1,7 @@
 //! Rack layout: the rack, the devices in it and where each device is mounted.
 
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::fmt;
 
 use kdl::{KdlDocument, KdlEntry, KdlNode, NodeKey};
@@ -349,7 +351,7 @@ fn read_rack(node: &KdlNode, problems: &mut Vec<Problem>) -> Option<Rack> {
     }
 
     let mut devices = Vec::new();
-    let mut ids: Vec<(&str, SourceSpan)> = Vec::new();
+    let mut ids: HashMap<&str, SourceSpan> = HashMap::new();
     for child in block.map(KdlDocument::nodes).unwrap_or_default() {
         let key = child.name().value();
         if key != "device" {
@@ -363,14 +365,16 @@ fn read_rack(node: &KdlNode, problems: &mut Vec<Problem>) -> Option<Rack> {
         // reported however many mistakes the devices have.
         if let Some(id) = child.entry(0).and_then(|entry| entry.value().as_string()) {
             let span = entry_span(child, 0);
-            if let Some(&(_, first)) = ids.iter().find(|&&(other, _)| other == id) {
-                problems.push(
+            match ids.entry(id) {
+                Entry::Occupied(first) => problems.push(
                     Problem::new(format!("the device id `{id}` is used more than once"), span)
                         .with_label("used again here")
-                        .with_label_at(first, "first used here"),
-                );
+                        .with_label_at(*first.get(), "first used here"),
+                ),
+                Entry::Vacant(slot) => {
+                    slot.insert(span);
+                }
             }
-            ids.push((id, span));
         }
         if let Some(device) = read_device(child, units, problems) {
             devices.push(device);

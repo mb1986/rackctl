@@ -1,5 +1,7 @@
 //! Catalog models: descriptions of hardware, one per file.
 
+use std::collections::HashSet;
+
 use kdl::{KdlDocument, KdlNode};
 use strum::{EnumString, IntoStaticStr, VariantNames};
 
@@ -180,17 +182,16 @@ fn read_model(id: &str, node: &KdlNode, problems: &mut Vec<Problem>) -> Option<M
     let mut has_face = false;
     let mut legend = Legend::default();
     let mut legend_span = None;
-    let mut seen = Vec::new();
+    let mut seen = HashSet::new();
 
     for child in block.map(KdlDocument::nodes).unwrap_or_default() {
         let key = child.name().value();
-        if NODES.contains(&key) && !REPEATABLE.contains(&key) && seen.contains(&key) {
+        if !seen.insert(key) && NODES.contains(&key) && !REPEATABLE.contains(&key) {
             problems.push(Problem::new(
                 format!("`{key}` is given more than once"),
                 child.name().span(),
             ));
         }
-        seen.push(key);
 
         match key {
             "name" => name = single(child, problems, |n| n.arg_str(0, "name")),
