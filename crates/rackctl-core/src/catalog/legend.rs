@@ -219,6 +219,8 @@ pub enum Align {
 pub struct Numbering {
     /// The number of the first element.
     pub first: u16,
+    /// Location of `first=` in the model file, when it is given.
+    pub first_span: Option<SourceSpan>,
     /// The order in which the elements are numbered.
     pub order: Order,
     /// The grid the elements are placed in, row by row, where `true` is an element and
@@ -232,7 +234,14 @@ pub struct Numbering {
 
 impl Default for Numbering {
     fn default() -> Self {
-        Self { first: 1, order: Order::default(), layout: None, numbers: None, group: None }
+        Self {
+            first: 1,
+            first_span: None,
+            order: Order::default(),
+            layout: None,
+            numbers: None,
+            group: None,
+        }
     }
 }
 
@@ -488,13 +497,14 @@ fn read_numbering(
         None
     };
     let first = reader.opt_int("first");
+    let first_span = first.map(|_| span_of(node, "first"));
     let numbers = parsed(node, reader, "numbers", parse_numbers, invalid);
-    if first.is_some() && numbers.is_some() {
-        invalid
-            .push((span_of(node, "first"), "`first` has no effect next to `numbers`".to_owned()));
+    if let (Some(span), Some(_)) = (first_span, &numbers) {
+        invalid.push((span, "`first` has no effect next to `numbers`".to_owned()));
     }
     Numbering {
         first: first.unwrap_or(1),
+        first_span,
         order: parsed(node, reader, "order", parse_order, invalid)
             .map(|order| order.value)
             .unwrap_or_default(),
