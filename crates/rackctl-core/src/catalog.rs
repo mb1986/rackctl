@@ -15,7 +15,7 @@ use std::sync::OnceLock;
 use miette::SourceSpan;
 use thiserror::Error;
 
-pub use face::{Face, FaceKind, Faces, STRIP_WIDTH};
+pub use face::{Cell, Element, Face, FaceKind, Faces, STRIP_WIDTH};
 pub use legend::{Align, Direction, Legend, LegendEntry, Numbering, Order, Part, PartKind, State};
 pub use model::{Components, Depth, Ears, Kind, Model, Mount};
 

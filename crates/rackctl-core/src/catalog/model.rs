@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use kdl::{KdlDocument, KdlNode};
 use strum::{EnumString, IntoStaticStr, VariantNames};
 
-use super::face::{Faces, check_faces, read_face};
+use super::face::{Faces, check_faces, cut_faces, read_face};
 use super::legend::{Legend, read_legend};
 use crate::kdl_reader::{self, NodeReader, Problem};
 
@@ -235,7 +235,8 @@ fn read_model(id: &str, node: &KdlNode, problems: &mut Vec<Problem>) -> Option<M
         }
     }
 
-    check_faces(&faces, mount, height, problems);
+    check_faces(&mut faces, mount, height, problems);
+    cut_faces(&mut faces, &legend, problems);
     // A face that is present but invalid has already been reported.
     if let Some(span) = legend_span.filter(|_| !seen.contains("face")) {
         problems.push(

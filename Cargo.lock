@@ -302,6 +302,7 @@ dependencies = [
  "strum",
  "tempfile",
  "thiserror",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]
