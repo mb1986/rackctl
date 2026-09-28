@@ -46,14 +46,14 @@ impl Group<'_> {
     }
 }
 
-/// The elements that have one number: one element, or for a combo port an RJ45 and an SFP
-/// element.
-#[derive(Debug, Clone, Copy, Default)]
-struct Slot {
+/// The elements that have one number, as positions in [`Face::elements`]: one element, or
+/// for a combo port an RJ45 and an SFP element.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Slot {
     /// The RJ45 element of a network connector, or the element of any other part.
-    element: Option<usize>,
+    pub element: Option<usize>,
     /// The SFP element of a network connector.
-    sfp: Option<usize>,
+    pub sfp: Option<usize>,
 }
 
 impl Slot {
@@ -62,8 +62,45 @@ impl Slot {
     }
 }
 
+/// The numbers of one part on a face, such as its ports: the elements that have each number,
+/// so that a status for port 17 finds its element directly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Numbers {
+    part: Part,
+    /// The groups, the default group first, each a run of `slots`.
+    segments: Vec<Segment>,
+    slots: Vec<Slot>,
+}
+
+/// The slots of one group in a number table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Segment {
+    group: Option<String>,
+    /// The number of the segment's first slot.
+    base: u16,
+    offset: usize,
+    size: usize,
+}
+
+impl Numbers {
+    /// Returns the part the table numbers.
+    #[must_use]
+    pub const fn part(&self) -> Part {
+        self.part
+    }
+
+    /// Returns the elements with `number` in `group`: port XG3 is `get(Some("XG"), 3)`.
+    #[must_use]
+    pub fn get(&self, group: Option<&str>, number: u16) -> Option<Slot> {
+        let segment = self.segments.iter().find(|segment| segment.group.as_deref() == group)?;
+        let at = usize::from(number.checked_sub(segment.base)?);
+        let slot = self.slots.get(segment.offset + at).filter(|_| at < segment.size)?;
+        Some(*slot).filter(|slot| !slot.is_empty())
+    }
+}
+
 /// Numbers the elements of every face, and reports numberings that are ambiguous, do not
-/// fit the face, do not add up to the declared count, or have gaps.
+/// fit the face, do not add up to the declared count, have gaps, or differ between faces.
 pub fn number_faces(
     faces: &mut Faces,
     legend: &Legend,
@@ -75,6 +112,46 @@ pub fn number_faces(
         for numbering in &numberings {
             number_part(face, numbering, components, problems);
         }
+    }
+    for numbering in &numberings {
+        check_faces_agree(faces, numbering, problems);
+    }
+}
+
+/// Reports faces that split a part's numbers differently between its groups. Complete tables
+/// can only differ there: the listed numbers are the same on every face, and the free ones
+/// count up the same way.
+fn check_faces_agree(faces: &Faces, numbering: &Numbering<'_>, problems: &mut Vec<Problem>) {
+    let mut tables = faces.iter().filter_map(|face| Some((face, face.numbers(numbering.part)?)));
+    let Some((first, reference)) = tables.next() else { return };
+    let sizes = |numbers: &Numbers| -> Vec<usize> {
+        numbers.segments.iter().map(|segment| segment.size).collect()
+    };
+    let (name, _) = names(numbering.part);
+    for (face, numbers) in tables.filter(|(_, numbers)| sizes(numbers) != sizes(reference)) {
+        let shown: Vec<String> = numbering
+            .groups
+            .iter()
+            .zip(sizes(numbers))
+            .map(|(group, size)| {
+                let in_group = group.name.map(|name| format!(" in group `{name}`"));
+                format!("{}{}", plural(size, name), in_group.unwrap_or_default())
+            })
+            .collect();
+        let expected: Vec<String> = sizes(reference).iter().map(ToString::to_string).collect();
+        problems.push(
+            Problem::new(
+                format!(
+                    "the {} face shows {}, but the {} face shows {}",
+                    face.kind.name(),
+                    shown.join(" and "),
+                    first.kind.name(),
+                    expected.join(" and ")
+                ),
+                face.span,
+            )
+            .with_label_at(first.span, format!("the {} face", first.kind.name())),
+        );
     }
 }
 
@@ -204,9 +281,10 @@ fn number_part(
 }
 
 /// Checks the numbers of one part on `face` against the declared count, then fills the
-/// part's number table, one segment per group, and reports the numbers it skips.
+/// part's number table, one segment per group, and reports the numbers it skips. A table
+/// without gaps is kept on the face.
 fn check_numbers(
-    face: &Face,
+    face: &mut Face,
     numbering: &Numbering<'_>,
     shown: &[(usize, &LegendEntry, Vec<usize>)],
     components: &Components,
@@ -247,15 +325,18 @@ fn check_numbers(
         return;
     }
 
-    let mut table = vec![Slot::default(); total];
+    let mut slots = vec![Slot::default(); total];
+    let mut segments = Vec::with_capacity(sizes.len());
+    let mut complete = true;
     let mut offset = 0;
     for (at, (group, size)) in numbering.groups.iter().zip(sizes).enumerate() {
-        let segment = &mut table[offset..offset + size];
-        offset += size;
+        let segment = &mut slots[offset..offset + size];
         let first = group.free().map(|entry| entry.numbering.first);
         let Some(base) = first.into_iter().chain(group.listed.first().copied()).min() else {
             continue;
         };
+        segments.push(Segment { group: group.name.map(str::to_owned), base, offset, size });
+        offset += size;
         // Numbers past the end of the segment, which leave a gap before them.
         let mut beyond: Vec<usize> = Vec::new();
         for (_, entry, order) in shown.iter().filter(|(group, ..)| *group == at) {
@@ -272,7 +353,11 @@ fn check_numbers(
                 }
             }
         }
-        report_gaps(face, numbering.part, group, usize::from(base), segment, beyond, problems);
+        let base = usize::from(base);
+        complete &= !report_gaps(face, numbering.part, group, base, segment, beyond, problems);
+    }
+    if complete {
+        face.add_numbers(Numbers { part: numbering.part, segments, slots });
     }
 }
 
@@ -323,7 +408,7 @@ fn give_numbers(
 
 /// Reports the numbers a group's segment skips: its empty slots, and the numbers between
 /// its end and the numbers `beyond` it. Only `numbers=` can leave a gap, as the numbers
-/// left count up without one, so the problem points at them.
+/// left count up without one, so the problem points at them. Returns whether it reported.
 fn report_gaps(
     face: &Face,
     part: Part,
@@ -332,7 +417,7 @@ fn report_gaps(
     segment: &[Slot],
     mut beyond: Vec<usize>,
     problems: &mut Vec<Problem>,
-) {
+) -> bool {
     let empty = segment.iter().enumerate().filter(|(_, slot)| slot.is_empty());
     let mut skipped = runs(empty.map(|(at, _)| base + at));
     beyond.sort_unstable();
@@ -346,7 +431,7 @@ fn report_gaps(
     let lists = group.entries.iter().filter_map(|entry| entry.numbering.numbers.as_ref());
     let lists: Vec<&Spanned<Vec<u16>>> = lists.collect();
     let Some((first, others)) = lists.split_first().filter(|_| !skipped.is_empty()) else {
-        return;
+        return false;
     };
     let mut problem = Problem::new(
         format!(
@@ -361,6 +446,7 @@ fn report_gaps(
         problem = problem.with_label_at(other.span, "numbers also given here");
     }
     problems.push(problem);
+    true
 }
 
 /// Returns the declared count of a numbered part, such as `bays 8`; zero when absent.
@@ -737,5 +823,48 @@ mod tests {
             problems[0].help(),
             Some("a face shows every legend key of its ports, or none of them")
         );
+    }
+
+    #[test]
+    fn reports_faces_that_split_the_numbers_differently() {
+        let text = r#"model {
+            name "X"; kind "switch"; ports 6
+            face "nnnn xx\n~"
+            face compact=#true "nnn xxx"
+            legend { n port; x port group="XG"; ~ fill }
+        }"#;
+        let problems = Model::parse("x/y", text).expect_err("faces differ");
+        assert_eq!(
+            pointed(text, &problems),
+            [(
+                "the compact face shows 3 ports and 3 ports in group `XG`, but the normal face \
+                 shows 4 and 2",
+                r#""nnn xxx""#
+            )]
+        );
+    }
+
+    #[test]
+    fn looks_up_the_elements_of_a_number() {
+        let legend = r#"n port
+            g port numbers="5-6" order="down"
+            s port media="sfp" numbers="5-6" order="down"
+            x port group="XG""#;
+        let text = server(["nn g s xc", "nn g s x"], "ports 8", legend);
+        let face = Model::parse("x/y", &text).expect("valid model").faces.normal.expect("face");
+        let numbers = face.numbers(Part::Port).expect("port numbers");
+        // The key and row of each element with a number.
+        let at = |index: Option<usize>| {
+            index.map(|at| (face.elements()[at].key, face.elements()[at].row))
+        };
+        let get =
+            |group, number| numbers.get(group, number).map(|slot| (at(slot.element), at(slot.sfp)));
+        assert_eq!(get(None, 1), Some((Some(('n', 0)), None)));
+        assert_eq!(get(None, 6), Some((Some(('g', 1)), Some(('s', 1)))));
+        assert_eq!(get(Some("XG"), 2), Some((Some(('x', 1)), None)));
+        assert_eq!(get(None, 7), None);
+        assert_eq!(get(Some("XG"), 0), None);
+        assert_eq!(get(Some("YY"), 1), None);
+        assert!(face.numbers(Part::Bay).is_none());
     }
 }

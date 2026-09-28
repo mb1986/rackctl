@@ -6,6 +6,7 @@ use unicode_width::UnicodeWidthChar;
 
 use super::legend::{Legend, Part, PartKind};
 use super::model::Mount;
+use super::numbering::Numbers;
 use crate::kdl_reader::{NodeReader, Problem};
 
 /// The widest a strip face may be, in columns.
@@ -79,6 +80,8 @@ pub struct Face {
     elements: Vec<Element>,
     /// The elements that are not rectangles, already reported.
     irregular: Vec<usize>,
+    /// The number table of each part the face numbers without problems.
+    numbers: Vec<Numbers>,
 }
 
 /// One cell of a face: a character drawn as it is, or part of an element.
@@ -150,11 +153,23 @@ impl Face {
         &self.elements
     }
 
+    /// Returns the number table of a numbered part, such as [`Part::Port`] for all the ports,
+    /// RJ45 and SFP alike. A part the face does not show has none.
+    #[must_use]
+    pub fn numbers(&self, part: Part) -> Option<&Numbers> {
+        self.numbers.iter().find(|numbers| numbers.part() == part)
+    }
+
     /// Gives the element at `index` in [`Face::elements`] its number.
     pub(super) fn set_number(&mut self, index: usize, number: u16) {
         if let Some(element) = self.elements.get_mut(index) {
             element.number = Some(number);
         }
+    }
+
+    /// Keeps the number table of a part.
+    pub(super) fn add_numbers(&mut self, numbers: Numbers) {
+        self.numbers.push(numbers);
     }
 
     /// Returns the location of `count` characters of row `row`, starting at column `column`,
@@ -443,6 +458,7 @@ pub fn read_face(node: &KdlNode, faces: &mut Faces, problems: &mut Vec<Problem>)
         cells: Vec::new(),
         elements: Vec::new(),
         irregular: Vec::new(),
+        numbers: Vec::new(),
     });
 }
 
