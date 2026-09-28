@@ -12,6 +12,8 @@ pub const LITERAL: Color = Color::Indexed(245);
 pub const EAR: Color = Color::Indexed(250);
 /// The line under a device.
 pub const UNDERLINE: Color = Color::Indexed(244);
+/// Rails, screw holes and unit numbers.
+pub const RACK: Color = Color::Indexed(240);
 
 /// The colour of an element's state, chosen by whoever knows the device's status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
