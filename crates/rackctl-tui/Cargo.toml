@@ -11,6 +11,7 @@ publish.workspace = true
 
 [dependencies]
 rackctl-core.workspace = true
+ratatui.workspace = true
 
 [dev-dependencies]
 indoc.workspace = true

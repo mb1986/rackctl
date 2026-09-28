@@ -23,6 +23,7 @@ clap = { version = "4.6.7", features = ["derive"] }
 indoc = "2.0.7"
 kdl = { version = "6.7.1", default-features = false, features = ["span"] }
 miette = "7.6.0"
+ratatui = "0.30.2"
 strsim = "0.11.1"
 strum = { version = "0.28.0", features = ["derive"] }
 tempfile = "3.27.0"
