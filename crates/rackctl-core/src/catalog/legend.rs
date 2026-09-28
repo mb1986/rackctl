@@ -110,6 +110,8 @@ pub enum Part {
     Psu,
     /// A network interface of a server.
     Nic,
+    /// A management port, such as a server's iDRAC or iLO port.
+    Mgmt,
     /// An RJ45 port.
     Port,
     /// An SFP cage.
@@ -168,9 +170,13 @@ impl Part {
     pub const fn kind(self) -> PartKind {
         match self {
             Self::Power | Self::Id => PartKind::Led,
-            Self::Bay | Self::Psu | Self::Nic | Self::Port | Self::Sfp | Self::Outlet => {
-                PartKind::List
-            }
+            Self::Bay
+            | Self::Psu
+            | Self::Nic
+            | Self::Mgmt
+            | Self::Port
+            | Self::Sfp
+            | Self::Outlet => PartKind::List,
             Self::Name | Self::Short | Self::Model | Self::Text | Self::Amps | Self::Number => {
                 PartKind::Text
             }
@@ -186,7 +192,7 @@ impl Part {
             Self::Id | Self::Outlet => &[State::On, State::Off],
             Self::Bay => &[State::Ok, State::Rebuilding, State::Failed, State::Empty],
             Self::Psu => &[State::Ok, State::Failed, State::Off],
-            Self::Nic | Self::Port | Self::Sfp => &[State::Up, State::Down],
+            Self::Nic | Self::Mgmt | Self::Port | Self::Sfp => &[State::Up, State::Down],
             _ => &[],
         }
     }
@@ -688,6 +694,8 @@ mod tests {
     fn returns_the_glyphs_the_model_chooses() {
         let port = entry(r#"n port down="□""#);
         assert_eq!((port.glyph(State::Up), port.glyph(State::Down)), (None, Some("□")));
+        let mgmt = entry(r#"m mgmt down="□""#);
+        assert_eq!((mgmt.part, mgmt.glyph(State::Down)), (Part::Mgmt, Some("□")));
         let outlet = entry(r#"x outlet="█" type="C19" rating="16A""#);
         assert_eq!((outlet.glyph(State::On), outlet.glyph(State::Off)), (Some("█"), Some("█")));
         assert_eq!(outlet.outlet_type.as_deref(), Some("C19"));
