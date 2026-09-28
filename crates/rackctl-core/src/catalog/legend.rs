@@ -61,8 +61,11 @@ pub struct LegendEntry {
     pub numbering: Numbering,
     /// The fixed text of a `text` part.
     pub text: Option<String>,
-    /// How a text part is placed in its run.
-    pub align: Align,
+    /// How a text or number part is placed in its run, when the entry chooses. Text is
+    /// placed on the left by default, and a number towards the element it belongs to.
+    pub align: Option<Align>,
+    /// The blank columns a number part keeps next to its element.
+    pub gap: usize,
     /// The socket type of an outlet, for example `C13`.
     pub outlet_type: Option<String>,
     /// The rated current of an outlet, for example `10A`.
@@ -123,6 +126,8 @@ pub enum Part {
     Text,
     /// The total current of a PDU.
     Amps,
+    /// The number of the numbered element the field touches.
+    Number,
     /// Blank columns that stretch a row to the width of the face.
     Fill,
     /// One blank column.
@@ -166,7 +171,9 @@ impl Part {
             Self::Bay | Self::Psu | Self::Nic | Self::Port | Self::Sfp | Self::Outlet => {
                 PartKind::List
             }
-            Self::Name | Self::Short | Self::Model | Self::Text | Self::Amps => PartKind::Text,
+            Self::Name | Self::Short | Self::Model | Self::Text | Self::Amps | Self::Number => {
+                PartKind::Text
+            }
             Self::Fill | Self::Space => PartKind::Layout,
         }
     }
@@ -336,11 +343,8 @@ fn read_entry(node: &KdlNode, key: char, problems: &mut Vec<Problem>) -> Option<
             }
         }
     }
-    let align = if part.kind() == PartKind::Text {
-        reader.opt_enum("align").unwrap_or_default()
-    } else {
-        Align::default()
-    };
+    let align = if part.kind() == PartKind::Text { reader.opt_enum("align") } else { None };
+    let gap = if part == Part::Number { reader.opt_int("gap").unwrap_or(0) } else { 0 };
     let numbering = if part.kind() == PartKind::List {
         read_numbering(node, &mut reader, part, &mut invalid)
     } else {
@@ -365,6 +369,7 @@ fn read_entry(node: &KdlNode, key: char, problems: &mut Vec<Problem>) -> Option<
         numbering,
         text,
         align,
+        gap,
         outlet_type: outlet_type.map(|value| value.value),
         rating: rating.map(|value| value.value),
         span: node.span(),
@@ -650,7 +655,9 @@ mod tests {
         assert_eq!(bay.numbering.first, 0);
         assert_eq!(bay.numbering.order, Order { primary: Direction::Down, secondary: None });
         assert_eq!(entry(r#"t text="APC""#).text.as_deref(), Some("APC"));
-        assert_eq!(entry(r#"a amps align="right""#).align, Align::Right);
+        assert_eq!(entry(r#"a amps align="right""#).align, Some(Align::Right));
+        let number = entry(r##""#" number gap=1"##);
+        assert_eq!((number.part, number.gap, number.align), (Part::Number, 1, None));
         assert_eq!(entry("~ fill").part, Part::Fill);
         assert_eq!(entry("* space").part, Part::Space);
     }

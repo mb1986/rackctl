@@ -1,5 +1,7 @@
 //! Faces: the pictures a model's front panel is drawn from.
 
+use std::collections::BTreeSet;
+
 use kdl::{KdlEntry, KdlNode};
 use miette::SourceSpan;
 use unicode_width::UnicodeWidthChar;
@@ -110,6 +112,9 @@ pub struct Element {
     pub height: usize,
     /// Location of the element's top row in the model file.
     pub span: SourceSpan,
+    /// For a number field, the numbered element whose number it shows: the one it touches
+    /// on its left or right.
+    pub number_of: Option<usize>,
 }
 
 impl Element {
@@ -230,6 +235,7 @@ impl Face {
                                 width: 1,
                                 height: 1,
                                 span,
+                                number_of: None,
                             });
                             Cell::Element(elements.len() - 1)
                         }
@@ -257,8 +263,53 @@ impl Face {
                 );
             }
         }
+        link_number_fields(&cells, &mut elements, legend, problems);
         self.cells = cells;
         self.elements = elements;
+    }
+}
+
+/// Links each number field to the numbered element it touches on its left or right, and
+/// checks that it has room for a number besides its gap.
+fn link_number_fields(
+    cells: &[Vec<Cell>],
+    elements: &mut [Element],
+    legend: &Legend,
+    problems: &mut Vec<Problem>,
+) {
+    for index in 0..elements.len() {
+        let field = &elements[index];
+        if field.part != Part::Number {
+            continue;
+        }
+        let numbered_at = |column: Option<usize>| match cells[field.row].get(column?) {
+            Some(&Cell::Element(other)) if elements[other].part.kind() == PartKind::List => {
+                Some(other)
+            }
+            _ => None,
+        };
+        let left = numbered_at(field.column.checked_sub(1));
+        let right = numbered_at(Some(field.column + field.width));
+        let gap = legend.get(field.key).map_or(0, |entry| entry.gap);
+        let problem = match (left, right) {
+            (Some(_), Some(_)) => Some("this number field touches numbered elements on both sides"),
+            (None, None) => Some("a number field must touch a bay, port or other numbered element"),
+            _ => None,
+        };
+        let span = field.span;
+        let room = field.width > gap;
+        if let Some(message) = problem {
+            problems.push(Problem::new(message, span).with_help(
+                "put it directly on the left or right of one numbered element, as in `###o`",
+            ));
+        }
+        if !room {
+            problems.push(Problem::new(
+                format!("this number field has no room for a number besides its `gap={gap}`"),
+                span,
+            ));
+        }
+        elements[index].number_of = left.xor(right);
     }
 }
 
@@ -296,11 +347,11 @@ fn width_problem(character: char, span: SourceSpan) -> Option<Problem> {
     match character.width() {
         Some(1) => None,
         None => Some(Problem::new(
-            format!("a picture cannot contain control characters such as `{shown}`"),
+            format!("control characters such as `{shown}` cannot be drawn"),
             span,
         )),
         Some(width) => Some(Problem::new(
-            format!("`{shown}` is {width} columns wide; each character of a picture must be one"),
+            format!("`{shown}` is {width} columns wide; every character must be one column"),
             span,
         )),
     }
@@ -414,6 +465,53 @@ pub fn check_faces(
 pub fn cut_faces(faces: &mut Faces, legend: &Legend, problems: &mut Vec<Problem>) {
     for face in faces.iter_mut() {
         face.cut(legend, problems);
+    }
+}
+
+/// Checks that every glyph fits the elements drawn with it: each of its characters is one
+/// column wide, and it is one character, which fills the element, or one per cell.
+pub fn check_glyphs(faces: &Faces, legend: &Legend, problems: &mut Vec<Problem>) {
+    for entry in legend.entries() {
+        let cells: BTreeSet<usize> = faces
+            .iter()
+            .flat_map(Face::elements)
+            .filter(|element| element.key == entry.key)
+            .map(|element| element.width * element.height)
+            .collect();
+        for glyph in entry.glyphs() {
+            problems.extend(glyph.value.chars().find_map(|c| width_problem(c, glyph.span)));
+            let length = glyph.value.chars().count();
+            if let Some(size) = cells.iter().find(|&&size| length > 1 && size != length) {
+                problems.push(
+                    Problem::new(
+                        format!(
+                            "this glyph has {length} characters, but a `{}` element covers {size} \
+                             cells",
+                            entry.key
+                        ),
+                        glyph.span,
+                    )
+                    .with_help(
+                        "a glyph is one character, which fills the element, or one per cell",
+                    ),
+                );
+            }
+        }
+    }
+}
+
+/// Reports legend keys that no face uses.
+pub fn check_unused_keys(faces: &Faces, legend: &Legend, problems: &mut Vec<Problem>) {
+    for entry in legend.entries() {
+        if !faces.iter().flat_map(Face::elements).any(|element| element.key == entry.key) {
+            problems.push(
+                Problem::new(
+                    format!("legend key `{}` is not used by any face", entry.key),
+                    entry.span,
+                )
+                .with_help("use it in a picture, or remove it from the legend"),
+            );
+        }
     }
 }
 
@@ -668,9 +766,63 @@ mod tests {
         assert_eq!(
             messages(text),
             [
-                "`中` is 2 columns wide; each character of a picture must be one",
-                "a picture cannot contain control characters such as `\\t`",
+                "`中` is 2 columns wide; every character must be one column",
+                "control characters such as `\\t` cannot be drawn",
             ]
         );
+    }
+
+    #[test]
+    fn links_number_fields_to_the_element_they_touch() {
+        let text = server(["##b c##", "~"], r##""#" number gap=1; b bay; c psu; ~ fill"##);
+        let face = normal_face(&text);
+        let linked: Vec<_> = face
+            .elements()
+            .iter()
+            .filter_map(|e| Some((e.column, face.elements()[e.number_of?].key)))
+            .collect();
+        assert_eq!(linked, [(0, 'b'), (5, 'c')]);
+    }
+
+    #[test]
+    fn reports_number_fields_without_one_element_to_number() {
+        let text = server(["## b b##b #b", "~"], r##""#" number gap=1; b bay; ~ fill"##);
+        assert_eq!(
+            messages(&text),
+            [
+                "a number field must touch a bay, port or other numbered element",
+                "this number field touches numbered elements on both sides",
+                "this number field has no room for a number besides its `gap=1`",
+            ]
+        );
+    }
+
+    #[test]
+    fn reports_glyphs_that_do_not_fit_their_elements() {
+        let text = server(["b__ b_ cc", "~"], r#"b bay="abc"; c psu="中"; ~ fill"#);
+        let problems = Model::parse("x/y", &text).expect_err("glyphs that do not fit");
+        let found: Vec<_> = problems
+            .iter()
+            .map(|p| (p.message(), &text[p.span().offset()..p.span().offset() + p.span().len()]))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("this glyph has 3 characters, but a `b` element covers 2 cells", r#"bay="abc""#),
+                ("`中` is 2 columns wide; every character must be one column", r#"psu="中""#),
+            ]
+        );
+    }
+
+    #[test]
+    fn accepts_glyphs_of_one_character_or_one_per_cell() {
+        let text = server(["b__ c c", "~"], r#"b bay="abc"; c psu="■"; ~ fill"#);
+        assert!(Model::parse("x/y", &text).is_ok());
+    }
+
+    #[test]
+    fn reports_legend_keys_that_no_face_uses() {
+        let text = server(["p", "~"], "p power; b bay; ~ fill");
+        assert_eq!(messages(&text), ["legend key `b` is not used by any face"]);
     }
 }
