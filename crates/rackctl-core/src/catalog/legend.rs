@@ -57,6 +57,9 @@ pub struct LegendEntry {
     pub key: char,
     /// The part of the device the key draws.
     pub part: Part,
+    /// The connector of a port, NIC or management port: RJ45 unless the entry gives
+    /// `media="sfp"`. Other parts have none.
+    pub media: Option<Media>,
     /// How the elements of a list part are numbered.
     pub numbering: Numbering,
     /// The fixed text of a `text` part.
@@ -112,10 +115,8 @@ pub enum Part {
     Nic,
     /// A management port, such as a server's iDRAC or iLO port.
     Mgmt,
-    /// An RJ45 port.
+    /// A port of a switch, router or patch panel.
     Port,
-    /// An SFP cage.
-    Sfp,
     /// A power outlet.
     Outlet,
     /// The device's name.
@@ -170,13 +171,9 @@ impl Part {
     pub const fn kind(self) -> PartKind {
         match self {
             Self::Power | Self::Id => PartKind::Led,
-            Self::Bay
-            | Self::Psu
-            | Self::Nic
-            | Self::Mgmt
-            | Self::Port
-            | Self::Sfp
-            | Self::Outlet => PartKind::List,
+            Self::Bay | Self::Psu | Self::Nic | Self::Mgmt | Self::Port | Self::Outlet => {
+                PartKind::List
+            }
             Self::Name | Self::Short | Self::Model | Self::Text | Self::Amps | Self::Number => {
                 PartKind::Text
             }
@@ -192,16 +189,16 @@ impl Part {
             Self::Id | Self::Outlet => &[State::On, State::Off],
             Self::Bay => &[State::Ok, State::Rebuilding, State::Failed, State::Empty],
             Self::Psu => &[State::Ok, State::Failed, State::Off],
-            Self::Nic | Self::Mgmt | Self::Port | Self::Sfp => &[State::Up, State::Down],
+            Self::Nic | Self::Mgmt | Self::Port => &[State::Up, State::Down],
             _ => &[],
         }
     }
 
-    /// Returns whether the part is an RJ45 port or an SFP cage. Ports and cages of the same
-    /// group share one numbering, so that a number used by both forms a combo port.
+    /// Returns whether the part is a network connector, which is RJ45 or SFP. The same
+    /// number on an RJ45 and an SFP element of one part is one combo port.
     #[must_use]
-    pub const fn is_port(self) -> bool {
-        matches!(self, Self::Port | Self::Sfp)
+    pub const fn has_media(self) -> bool {
+        matches!(self, Self::Nic | Self::Mgmt | Self::Port)
     }
 }
 
@@ -270,11 +267,16 @@ impl Direction {
     }
 }
 
-/// The media an RJ45 or SFP port can have.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumString, IntoStaticStr, VariantNames)]
+/// The connector of a port, NIC or management port.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, EnumString, IntoStaticStr, VariantNames,
+)]
 #[strum(serialize_all = "kebab-case")]
-enum Media {
+pub enum Media {
+    /// A socket for a copper cable.
+    #[default]
     Rj45,
+    /// A cage for an SFP module, such as a fibre or DAC transceiver.
     Sfp,
 }
 
@@ -308,7 +310,7 @@ pub fn read_legend(node: &KdlNode, problems: &mut Vec<Problem>) -> Legend {
 /// Reads one legend entry, such as `p power` or `b bay="■" first=0`. Returns `None` when
 /// its type is missing, unknown, not a string or given twice.
 fn read_entry(node: &KdlNode, key: char, problems: &mut Vec<Problem>) -> Option<LegendEntry> {
-    let (mut part, shorthand) = entry_type(node, key, problems)?;
+    let (part, shorthand) = entry_type(node, key, problems)?;
     let mut reader = NodeReader::new(node, problems);
     let value = if let Some(name) = shorthand {
         reader.opt_str(name).map(|value| Spanned { value, span: span_of(node, name) })
@@ -358,9 +360,7 @@ fn read_entry(node: &KdlNode, key: char, problems: &mut Vec<Problem>) -> Option<
     } else {
         Numbering::default()
     };
-    if part == Part::Port && reader.opt_enum::<Media>("media") == Some(Media::Sfp) {
-        part = Part::Sfp;
-    }
+    let media = part.has_media().then(|| reader.opt_enum::<Media>("media").unwrap_or_default());
     let (outlet_type, rating) = if part == Part::Outlet {
         (
             parsed(node, &mut reader, "type", |text| text_value("`type`", text), &mut invalid),
@@ -374,6 +374,7 @@ fn read_entry(node: &KdlNode, key: char, problems: &mut Vec<Problem>) -> Option<
     let entry = LegendEntry {
         key,
         part,
+        media,
         numbering,
         text,
         align,
@@ -481,7 +482,7 @@ fn read_numbering(
     part: Part,
     invalid: &mut Invalid,
 ) -> Numbering {
-    let group = if part.is_port() {
+    let group = if part == Part::Port {
         parsed(node, reader, "group", parse_group, invalid).map(|group| group.value)
     } else {
         None
@@ -673,10 +674,12 @@ mod tests {
     }
 
     #[test]
-    fn reads_sfp_cages_written_either_way() {
-        assert_eq!(entry(r#"s sfp="▬""#).part, Part::Sfp);
-        assert_eq!(entry(r#"s port="▬" media="sfp""#).part, Part::Sfp);
-        assert_eq!(entry(r#"n port media="rj45""#).part, Part::Port);
+    fn reads_the_media_of_network_connectors() {
+        assert_eq!(entry(r#"s port="▬" media="sfp""#).media, Some(Media::Sfp));
+        assert_eq!(entry(r#"l nic media="sfp""#).media, Some(Media::Sfp));
+        assert_eq!(entry(r#"m mgmt media="rj45""#).media, Some(Media::Rj45));
+        assert_eq!(entry("n port").media, Some(Media::Rj45));
+        assert_eq!(entry("b bay").media, None);
     }
 
     #[test]
@@ -713,7 +716,6 @@ mod tests {
         assert_eq!(numbers.value, [25, 26, 49]);
         let offset = "legend {\n".len() + text.find("numbers=").expect("numbers in the text");
         assert_eq!(numbers.span.offset(), offset);
-        assert!(ports.part.is_port());
         assert_eq!(
             ports.numbering.order,
             Order { primary: Direction::Up, secondary: Some(Direction::Left) }

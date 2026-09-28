@@ -112,6 +112,9 @@ pub enum Ears {
 }
 
 /// The number of each kind of part a device has. Parts that are not declared count as zero.
+///
+/// Network connectors are counted by their numbers, so a combo port, with an RJ45 socket
+/// and an SFP cage, counts once.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Components {
     /// Drive bays.
@@ -122,10 +125,8 @@ pub struct Components {
     pub nics: u16,
     /// Dedicated management ports, such as a server's iDRAC or iLO port.
     pub mgmt: u16,
-    /// RJ45 ports of a switch, router or patch panel.
+    /// Ports of a switch, router or patch panel, in all groups.
     pub ports: u16,
-    /// SFP cages of a switch or router.
-    pub sfps: u16,
     /// Power outlets of a PDU or UPS.
     pub outlets: u16,
 }
@@ -145,7 +146,6 @@ const NODES: &[&str] = &[
     "nics",
     "mgmt",
     "ports",
-    "sfps",
     "outlets",
     "face",
     "legend",
@@ -224,7 +224,6 @@ fn read_model(id: &str, node: &KdlNode, problems: &mut Vec<Problem>) -> Option<M
             "nics" => components.nics = count(child, problems),
             "mgmt" => components.mgmt = count(child, problems),
             "ports" => components.ports = count(child, problems),
-            "sfps" => components.sfps = count(child, problems),
             "outlets" => components.outlets = count(child, problems),
             "face" => read_face(child, &mut faces, problems),
             "legend" => {
