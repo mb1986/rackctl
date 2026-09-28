@@ -1,6 +1,6 @@
 model {
   name "HPE LCD 8500"; short "LCD 8500"
-  kind "kvm"; height 1; psus 1
+  kind "kvm"; height 1
 
   face #"""
      p▁▁▁▁▁🭈🬭🬭🬭🬭🬭🬭🬭🬭🬭🬭🬭🬭🬭🬭🬭🬭🬭🬭🬭🬭🬭🬭🬭🬭🬭🬭🬭🬭🬭🬭🬭🬭🬭🬽▁▁▁▁▁
