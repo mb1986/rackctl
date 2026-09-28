@@ -28,7 +28,7 @@ impl Faces {
         [&self.normal, &self.compact, &self.strip].into_iter().flatten()
     }
 
-    fn iter_mut(&mut self) -> impl Iterator<Item = &mut Face> {
+    pub(super) fn iter_mut(&mut self) -> impl Iterator<Item = &mut Face> {
         [&mut self.normal, &mut self.compact, &mut self.strip].into_iter().flatten()
     }
 
@@ -111,6 +111,8 @@ pub struct Element {
     /// For a number field, the numbered element whose number it shows: the one it touches
     /// on its left or right.
     pub number_of: Option<usize>,
+    /// For a numbered element, such as a bay or a port, its number.
+    pub number: Option<u16>,
 }
 
 impl Element {
@@ -146,6 +148,13 @@ impl Face {
     #[must_use]
     pub fn elements(&self) -> &[Element] {
         &self.elements
+    }
+
+    /// Gives the element at `index` in [`Face::elements`] its number.
+    pub(super) fn set_number(&mut self, index: usize, number: u16) {
+        if let Some(element) = self.elements.get_mut(index) {
+            element.number = Some(number);
+        }
     }
 
     /// Returns the location of `count` characters of row `row`, starting at column `column`,
@@ -253,6 +262,7 @@ impl Face {
                                 height: 1,
                                 span,
                                 number_of: None,
+                                number: None,
                             });
                             Cell::Element(elements.len() - 1)
                         }
@@ -633,6 +643,7 @@ fn kdl_lines(text: &str) -> Vec<(usize, &str)> {
 
 #[cfg(test)]
 mod tests {
+    use indoc::{formatdoc, indoc};
     use miette::Diagnostic;
 
     use super::*;
@@ -651,13 +662,17 @@ mod tests {
         problems(text).iter().map(|problem| problem.message().to_owned()).collect()
     }
 
-    /// The model text of a 1U server whose normal face is `rows`, described by `legend`.
-    fn server(rows: [&str; 2], legend: &str) -> String {
+    /// The model text of a 1U server with the part counts `counts`, such as `bays 2`, whose
+    /// normal face is `rows`, described by `legend`.
+    fn server(rows: [&str; 2], counts: &str, legend: &str) -> String {
         let [top, bottom] = rows;
-        format!(
-            "model {{ name \"X\"; kind \"server\"\nface #\"\"\"\n{top}\n{bottom}\n\"\"\"#\n\
-             legend {{ {legend} }} }}"
-        )
+        formatdoc! {r##"
+            model {{ name "X"; kind "server"; {counts}
+            face #"""
+            {top}
+            {bottom}
+            """#
+            legend {{ {legend} }} }}"##}
     }
 
     fn normal_face(text: &str) -> Face {
@@ -677,7 +692,7 @@ mod tests {
     #[test]
     fn reads_faces_and_locates_their_characters() {
         let text = r##"model {
-            name "X"; kind "server"; height 1
+            name "X"; kind "server"; height 1; bays 6
             face #"""
               p nnnn
               bbbbbb
@@ -698,7 +713,7 @@ mod tests {
     #[test]
     fn reads_a_strip_on_a_side_mounted_model() {
         let text = r##"model {
-            name "Strip"; kind "pdu"; mount "side"
+            name "Strip"; kind "pdu"; mount "side"; outlets 1
             face strip=#true #"""
               p
               ~
@@ -769,7 +784,7 @@ mod tests {
         // Four rows would be too many for 1U, but no face is checked against an invalid height.
         let model = |height| {
             format!(
-                r#"model {{ name "X"; kind "server"; height {height}; face "p\nb\nb\nb"; legend {{ p power; b bay }} }}"#
+                r#"model {{ name "X"; kind "server"; height {height}; bays 3; face "p\nb\nb\nb"; legend {{ p power; b bay }} }}"#
             )
         };
         assert_eq!(messages(&model("0")), ["`height` must be at least 1"]);
@@ -779,8 +794,7 @@ mod tests {
     #[test]
     fn points_at_the_whole_picture_for_rows_not_located() {
         // The first row is written with an escape, so neither row is located.
-        let text =
-            r#"model { name "X"; kind "server"; face "p\u{62}\nbb"; legend { p power; b bay } }"#;
+        let text = r#"model { name "X"; kind "server"; bays 3; face "p\u{62}\nbb"; legend { p power; b bay } }"#;
         let normal = normal_face(text);
         assert_eq!(normal.rows().collect::<Vec<_>>(), ["pb", "bb"]);
         assert_eq!(normal.span_at(0, 0, 1), normal.span);
@@ -816,16 +830,28 @@ mod tests {
 
     #[test]
     fn stops_locating_rows_at_the_first_one_written_with_an_escape() {
-        let text = "face \"\"\"\n  ab\n  c\\\"d\n  ef\n  \"\"\"";
+        let text = indoc! {r#"
+            face """
+              ab
+              c\"d
+              ef
+              """
+        "#};
         assert_eq!(located(text), [text.find("ab"), None, None]);
         // A `\` at the end of a line joins it to the next one.
-        let text = "face \"\"\"\n  ab\\\n  cd\n  ef\n  \"\"\"";
+        let text = indoc! {r#"
+            face """
+              ab\
+              cd
+              ef
+              """
+        "#};
         assert_eq!(located(text), [None, None]);
     }
 
     #[test]
     fn cuts_the_picture_into_elements_and_literals() {
-        let text = server(["p N bbx", "~~ tttt"], "p power; b bay; t short; ~ fill");
+        let text = server(["p N bbx", "~~ tttt"], "bays 2", "p power; b bay; t short; ~ fill");
         let face = normal_face(&text);
         assert_eq!(face.cell(0, 2), Some(Cell::Literal('N')));
         assert_eq!(face.cell(0, 6), Some(Cell::Literal('x')));
@@ -847,7 +873,7 @@ mod tests {
 
     #[test]
     fn extends_elements_with_underscores_and_bars() {
-        let text = server(["b__ c_ tt_", "||| ||"], "b bay; c psu; t short");
+        let text = server(["b__ c_ tt_", "||| ||"], "bays 1; psus 1", "b bay; c psu; t short");
         assert_eq!(
             elements(&text),
             [('b', [0, 0, 3, 2], "b__"), ('c', [0, 4, 2, 2], "c_"), ('t', [0, 7, 3, 1], "tt_")]
@@ -858,7 +884,7 @@ mod tests {
     fn reports_underscores_and_bars_with_nothing_to_continue() {
         // Each run is reported once. Neither continues a literal or a fill, and `|` does not
         // continue a text field either.
-        let text = server(["_b x__ ~_ tt", "   |      ||"], "b bay; t short; ~ fill");
+        let text = server(["_b x__ ~_ tt", "   |      ||"], "bays 1", "b bay; t short; ~ fill");
         assert_eq!(
             messages(&text),
             [
@@ -873,7 +899,7 @@ mod tests {
 
     #[test]
     fn reports_elements_that_are_not_rectangles() {
-        let text = server(["b_ c", "|  |_"], "b bay; c bay");
+        let text = server(["b_ c", "|  |_"], "bays 1; psus 1", "b bay; c psu");
         assert_eq!(
             pointed(&text, &problems(&text)),
             [("this element is not a rectangle", "b_"), ("this element is not a rectangle", "c")]
@@ -882,7 +908,7 @@ mod tests {
 
     #[test]
     fn reports_characters_that_are_not_one_column_wide() {
-        let text = server(["中b", "\tb"], "b bay");
+        let text = server(["中b", "\tb"], "bays 2", "b bay");
         assert_eq!(
             pointed(&text, &problems(&text)),
             [
@@ -894,7 +920,11 @@ mod tests {
 
     #[test]
     fn links_number_fields_to_the_element_they_touch() {
-        let text = server(["##b c##", "~"], r##""#" number gap=1; b bay; c psu; ~ fill"##);
+        let text = server(
+            ["##b c##", "~"],
+            "bays 1; psus 1",
+            r##""#" number gap=1; b bay; c psu; ~ fill"##,
+        );
         let face = normal_face(&text);
         let linked: Vec<_> = face
             .elements()
@@ -909,6 +939,7 @@ mod tests {
         // A lone field is reported only once, not also for having no room besides its gap.
         let text = server(
             ["# b##b #b ##p #t", "~"],
+            "bays 3",
             r##""#" number gap=1; b bay; p power; t short; ~ fill"##,
         );
         let touch = "a number field must touch a bay, port or other numbered element";
@@ -926,13 +957,14 @@ mod tests {
 
     #[test]
     fn accepts_glyphs_of_one_character_or_one_per_cell() {
-        let text = server(["b__ c c", "~"], r#"b bay="abc"; c psu="■"; ~ fill"#);
+        let text = server(["b__ c c", "~"], "bays 1; psus 2", r#"b bay="abc"; c psu="■"; ~ fill"#);
         assert!(Model::parse("x/y", &text).is_ok());
     }
 
     #[test]
     fn reports_glyphs_that_do_not_fit_their_elements() {
-        let text = server(["b__ b cc", "~"], r#"b bay="abc"; c psu="中"; ~ fill"#);
+        let text =
+            server(["b__ b cc", "~"], "bays 2; psus 2", r#"b bay="abc"; c psu="中"; ~ fill"#);
         let problems = problems(&text);
         assert_eq!(
             pointed(&text, &problems),
@@ -951,30 +983,30 @@ mod tests {
 
     #[test]
     fn reports_a_bad_glyph_once() {
-        let text = server(["b__ b_", "~"], r#"b bay="a\u{301}"; ~ fill"#);
+        let text = server(["b__ b_", "~"], "bays 2", r#"b bay="a\u{301}"; ~ fill"#);
         assert_eq!(
             messages(&text),
             ["`\\u{301}` is 0 columns wide; every character must be one column"]
         );
         // Two characters for three cells, but the control character is all that is reported.
-        let text = server(["b__", "~"], r#"b bay="a\t"; ~ fill"#);
+        let text = server(["b__", "~"], "bays 1", r#"b bay="a\t"; ~ fill"#);
         assert_eq!(messages(&text), ["a glyph must not contain control characters"]);
     }
 
     #[test]
     fn does_not_size_check_elements_that_are_not_rectangles() {
-        let text = server(["b_", "| "], r#"b bay="abc""#);
+        let text = server(["b_", "| "], "bays 1", r#"b bay="abc""#);
         assert_eq!(messages(&text), ["this element is not a rectangle"]);
     }
 
     #[test]
     fn holds_back_unused_keys_while_the_model_has_other_problems() {
-        let text = server(["p", "~"], "p power; b bay; ~ fill");
+        let text = server(["p", "~"], "", "p power; b bay; ~ fill");
         assert_eq!(
             pointed(&text, &problems(&text)),
             [("legend key `b` is not used by any face", "b bay")]
         );
-        let with_other_problem = server(["_p", "~"], "p power; b bay; ~ fill");
+        let with_other_problem = server(["_p", "~"], "", "p power; b bay; ~ fill");
         assert!(!messages(&with_other_problem).iter().any(|m| m.contains("not used")));
     }
 }

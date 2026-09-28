@@ -7,7 +7,7 @@ use strum::{EnumString, IntoStaticStr, VariantNames};
 
 use super::face::{Faces, check_faces, check_glyphs, check_unused_keys, cut_faces, read_face};
 use super::legend::{Legend, read_legend};
-use super::numbering::check_layouts;
+use super::numbering::number_faces;
 use crate::kdl_reader::{self, NodeReader, Problem};
 
 /// A hardware model from the catalog, such as a particular server, switch or PDU.
@@ -242,7 +242,7 @@ fn read_model(id: &str, node: &KdlNode, problems: &mut Vec<Problem>) -> Option<M
     check_faces(&mut faces, mount, face_height, problems);
     cut_faces(&mut faces, &legend, problems);
     check_glyphs(&faces, &legend, problems);
-    check_layouts(&faces, &legend, problems);
+    number_faces(&mut faces, &legend, &components, problems);
     // A face that is present but invalid has already been reported.
     if let Some(span) = legend_span.filter(|_| !seen.contains("face")) {
         problems.push(

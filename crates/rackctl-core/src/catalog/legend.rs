@@ -487,13 +487,19 @@ fn read_numbering(
     } else {
         None
     };
+    let first = reader.opt_int("first");
+    let numbers = parsed(node, reader, "numbers", parse_numbers, invalid);
+    if first.is_some() && numbers.is_some() {
+        invalid
+            .push((span_of(node, "first"), "`first` has no effect next to `numbers`".to_owned()));
+    }
     Numbering {
-        first: reader.opt_int("first").unwrap_or(1),
+        first: first.unwrap_or(1),
         order: parsed(node, reader, "order", parse_order, invalid)
             .map(|order| order.value)
             .unwrap_or_default(),
         layout: parsed(node, reader, "layout", parse_layout, invalid),
-        numbers: parsed(node, reader, "numbers", parse_numbers, invalid),
+        numbers,
         group,
     }
 }
@@ -802,7 +808,8 @@ mod tests {
                    m bay numbers="1, 2"
                    n bay numbers="65536"
                    o outlet type="" rating="1\n0A"
-                   q text="A\tB""#
+                   q text="A\tB"
+                   r bay first=0 numbers="1""#
             ),
             [
                 "`order` must be `right`, `left`, `down` or `up`, optionally followed by a \
@@ -825,6 +832,7 @@ mod tests {
                 "`type` must not be empty",
                 "`rating` must not contain control characters",
                 "a text must not contain control characters",
+                "`first` has no effect next to `numbers`",
             ]
         );
     }
