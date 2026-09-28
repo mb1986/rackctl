@@ -56,12 +56,6 @@ pub struct Slot {
     pub sfp: Option<usize>,
 }
 
-impl Slot {
-    const fn is_empty(self) -> bool {
-        self.element.is_none() && self.sfp.is_none()
-    }
-}
-
 /// The numbers of one part on a face, such as its ports: the elements that have each number,
 /// so that a status for port 17 finds its element directly.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,8 +88,7 @@ impl Numbers {
     pub fn get(&self, group: Option<&str>, number: u16) -> Option<Slot> {
         let segment = self.segments.iter().find(|segment| segment.group.as_deref() == group)?;
         let at = usize::from(number.checked_sub(segment.base)?);
-        let slot = self.slots.get(segment.offset + at).filter(|_| at < segment.size)?;
-        Some(*slot).filter(|slot| !slot.is_empty())
+        (at < segment.size).then(|| self.slots[segment.offset + at])
     }
 }
 
@@ -223,7 +216,9 @@ fn check_entry(part: Part, group: &Group<'_>, entry: &LegendEntry, problems: &mu
                 other.key,
                 entry.key,
                 group.describe(part),
-                describe_runs(&runs(shared.iter().map(|&number| usize::from(number))))
+                describe_runs(
+                    shared.chunk_by(|a, b| b - a == 1).map(|run| (run[0], run[run.len() - 1]))
+                )
             ),
             numbers.span,
         );
@@ -280,9 +275,8 @@ fn number_part(
     }
 }
 
-/// Checks the numbers of one part on `face` against the declared count, then fills the
-/// part's number table, one segment per group, and reports the numbers it skips. A table
-/// without gaps is kept on the face.
+/// Checks the numbers of one part on `face` against the declared count and for gaps, then
+/// keeps the part's number table on the face, one segment per group.
 fn check_numbers(
     face: &mut Face,
     numbering: &Numbering<'_>,
@@ -290,75 +284,66 @@ fn check_numbers(
     components: &Components,
     problems: &mut Vec<Problem>,
 ) {
-    // The size of each group's segment: its listed numbers, and the elements of its free
-    // entry, which take one new number each.
-    let mut sizes: Vec<usize> = numbering.groups.iter().map(|group| group.listed.len()).collect();
+    // Each group's numbers, sorted, with the entry and element that have them. The earlier
+    // checks leave them distinct, but for the two elements of a combo.
+    let mut numbered: Vec<Vec<(u16, &LegendEntry, usize)>> =
+        vec![Vec::new(); numbering.groups.len()];
     for (group, entry, order) in shown {
-        if entry.numbering.numbers.is_none() {
-            sizes[*group] += order.len();
-        }
+        let numbers =
+            order.iter().filter_map(|&index| Some((face.elements()[index].number?, index)));
+        numbered[*group].extend(numbers.map(|(number, index)| (number, *entry, index)));
     }
-    let total: usize = sizes.iter().sum();
-    let declared = usize::from(declared(components, numbering.part));
-    let (name, node) = names(numbering.part);
-    if total != declared {
-        let face_name = face.kind.name();
-        let problem = if declared == 0 {
-            Problem::new(
-                format!(
-                    "the {face_name} face shows {}, but the model declares none",
-                    plural(total, name)
-                ),
-                face.span,
-            )
-            .with_help(format!("add `{node} {total}` to the model"))
-        } else {
-            Problem::new(
-                format!(
-                    "the {face_name} face shows {}, but the model declares {declared}",
-                    plural(total, name)
-                ),
-                face.span,
-            )
-        };
+    for numbers in &mut numbered {
+        numbers.sort_unstable_by_key(|&(number, ..)| number);
+    }
+    let slots =
+        |numbers: &[(u16, &LegendEntry, usize)]| numbers.chunk_by(|a, b| a.0 == b.0).count();
+    let total: usize = numbered.iter().map(|numbers| slots(numbers)).sum();
+    let declared = declared(components, numbering.part);
+    if total != usize::from(declared) {
+        let (name, node) = names(numbering.part);
+        let count = if declared == 0 { "none".to_owned() } else { declared.to_string() };
+        let mut problem = Problem::new(
+            format!(
+                "the {} face shows {}, but the model declares {count}",
+                face.kind.name(),
+                plural(total, name)
+            ),
+            face.span,
+        );
+        if declared == 0 {
+            problem = problem.with_help(format!("add `{node} {total}` to the model"));
+        }
         problems.push(problem);
         return;
     }
-
-    let mut slots = vec![Slot::default(); total];
-    let mut segments = Vec::with_capacity(sizes.len());
     let mut complete = true;
-    let mut offset = 0;
-    for (at, (group, size)) in numbering.groups.iter().zip(sizes).enumerate() {
-        let segment = &mut slots[offset..offset + size];
-        let first = group.free().map(|entry| entry.numbering.first);
-        let Some(base) = first.into_iter().chain(group.listed.first().copied()).min() else {
-            continue;
-        };
-        segments.push(Segment { group: group.name.map(str::to_owned), base, offset, size });
-        offset += size;
-        // Numbers past the end of the segment, which leave a gap before them.
-        let mut beyond: Vec<usize> = Vec::new();
-        for (_, entry, order) in shown.iter().filter(|(group, ..)| *group == at) {
-            for &index in order {
-                let Some(number) = face.elements()[index].number else { continue };
-                let Some(slot) = segment.get_mut(usize::from(number - base)) else {
-                    beyond.push(usize::from(number));
-                    continue;
-                };
+    for (group, numbers) in numbering.groups.iter().zip(&numbered) {
+        complete &= !report_gaps(face, numbering.part, group, numbers, problems);
+    }
+    if !complete {
+        return;
+    }
+
+    // Without gaps, each group's numbers run from its lowest one, one slot per number.
+    let mut table = Numbers { part: numbering.part, segments: Vec::new(), slots: Vec::new() };
+    for (group, numbers) in numbering.groups.iter().zip(&numbered) {
+        let Some(&(base, ..)) = numbers.first() else { continue };
+        let (offset, size) = (table.slots.len(), slots(numbers));
+        table.segments.push(Segment { group: group.name.map(str::to_owned), base, offset, size });
+        for elements in numbers.chunk_by(|a, b| a.0 == b.0) {
+            let mut slot = Slot::default();
+            for &(_, entry, index) in elements {
                 if entry.media == Some(Media::Sfp) {
                     slot.sfp = Some(index);
                 } else {
                     slot.element = Some(index);
                 }
             }
+            table.slots.push(slot);
         }
-        let base = usize::from(base);
-        complete &= !report_gaps(face, numbering.part, group, base, segment, beyond, problems);
     }
-    if complete {
-        face.add_numbers(Numbers { part: numbering.part, segments, slots });
-    }
+    face.add_numbers(table);
 }
 
 /// Gives the elements of `entry` on `face` their numbers: those its `numbers=` lists, or
@@ -406,28 +391,21 @@ fn give_numbers(
     false
 }
 
-/// Reports the numbers a group's segment skips: its empty slots, and the numbers between
-/// its end and the numbers `beyond` it. Only `numbers=` can leave a gap, as the numbers
-/// left count up without one, so the problem points at them. Returns whether it reported.
+/// Reports the numbers a group skips between its sorted `numbers`. Only `numbers=` can
+/// leave a gap, as the numbers left count up without one, so the problem points at them.
+/// Returns whether it reported.
 fn report_gaps(
     face: &Face,
     part: Part,
     group: &Group<'_>,
-    base: usize,
-    segment: &[Slot],
-    mut beyond: Vec<usize>,
+    numbers: &[(u16, &LegendEntry, usize)],
     problems: &mut Vec<Problem>,
 ) -> bool {
-    let empty = segment.iter().enumerate().filter(|(_, slot)| slot.is_empty());
-    let mut skipped = runs(empty.map(|(at, _)| base + at));
-    beyond.sort_unstable();
-    let mut next = base + segment.len();
-    for number in beyond {
-        if number > next {
-            add_run(&mut skipped, next, number - 1);
-        }
-        next = number + 1;
-    }
+    let skipped: Vec<(u16, u16)> = numbers
+        .windows(2)
+        .filter(|pair| pair[1].0 - pair[0].0 > 1)
+        .map(|pair| (pair[0].0 + 1, pair[1].0 - 1))
+        .collect();
     let lists = group.entries.iter().filter_map(|entry| entry.numbering.numbers.as_ref());
     let lists: Vec<&Spanned<Vec<u16>>> = lists.collect();
     let Some((first, others)) = lists.split_first().filter(|_| !skipped.is_empty()) else {
@@ -438,7 +416,7 @@ fn report_gaps(
             "the numbers of the {} on the {} face skip {}",
             group.describe(part),
             face.kind.name(),
-            describe_runs(&skipped)
+            describe_runs(skipped)
         ),
         first.span,
     );
@@ -474,29 +452,12 @@ const fn names(part: Part) -> (&'static str, &'static str) {
     }
 }
 
-/// Groups sorted numbers into runs of consecutive ones.
-fn runs(numbers: impl IntoIterator<Item = usize>) -> Vec<(usize, usize)> {
-    let mut runs: Vec<(usize, usize)> = Vec::new();
-    for number in numbers {
-        add_run(&mut runs, number, number);
-    }
-    runs
-}
-
-/// Adds the run `from..=to` after `runs`, joining it to the last run when they touch.
-fn add_run(runs: &mut Vec<(usize, usize)>, from: usize, to: usize) {
-    match runs.last_mut() {
-        Some((_, end)) if *end + 1 == from => *end = to,
-        _ => runs.push((from, to)),
-    }
-}
-
-/// Writes runs of numbers, such as `3, 7-9`.
-fn describe_runs(runs: &[(usize, usize)]) -> String {
-    let run = |&(from, to): &(usize, usize)| {
+/// Writes runs of numbers, given as their first and last numbers, such as `3, 7-9`.
+fn describe_runs(runs: impl IntoIterator<Item = (u16, u16)>) -> String {
+    let run = |(from, to): (u16, u16)| {
         if from == to { from.to_string() } else { format!("{from}-{to}") }
     };
-    runs.iter().map(run).collect::<Vec<_>>().join(", ")
+    runs.into_iter().map(run).collect::<Vec<_>>().join(", ")
 }
 
 /// Returns the elements of `entry`'s key on `face`, as positions in [`Face::elements`], in
