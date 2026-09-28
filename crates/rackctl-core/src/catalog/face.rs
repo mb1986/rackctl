@@ -53,7 +53,9 @@ pub enum FaceKind {
 }
 
 impl FaceKind {
-    const fn name(self) -> &'static str {
+    /// Returns the name used in messages, such as `normal`.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
         match self {
             Self::Normal => "normal",
             Self::Compact => "compact",

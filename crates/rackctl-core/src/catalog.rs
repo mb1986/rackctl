@@ -4,6 +4,7 @@
 mod face;
 mod legend;
 mod model;
+mod numbering;
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;

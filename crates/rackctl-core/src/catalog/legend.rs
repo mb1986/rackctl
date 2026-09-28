@@ -263,7 +263,9 @@ pub enum Direction {
 }
 
 impl Direction {
-    const fn is_horizontal(self) -> bool {
+    /// Returns whether the direction runs along a row.
+    #[must_use]
+    pub const fn is_horizontal(self) -> bool {
         matches!(self, Self::Right | Self::Left)
     }
 }
