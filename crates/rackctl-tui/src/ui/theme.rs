@@ -8,6 +8,10 @@ pub const PANEL: Color = Color::Indexed(235);
 pub const TEXT: Color = Color::Indexed(255);
 /// Characters a face draws as they are, and number labels.
 pub const LITERAL: Color = Color::Indexed(245);
+/// A device's ears.
+pub const EAR: Color = Color::Indexed(250);
+/// The line under a device.
+pub const UNDERLINE: Color = Color::Indexed(244);
 
 /// The colour of an element's state, chosen by whoever knows the device's status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
