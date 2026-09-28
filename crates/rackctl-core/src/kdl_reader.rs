@@ -327,6 +327,20 @@ impl<'n, 'p> NodeReader<'n, 'p> {
         self.enum_value(entry, key)
     }
 
+    /// Reads an optional `#true` or `#false` property, for example `compact=#true`.
+    pub fn opt_bool(&mut self, key: &str) -> Option<bool> {
+        let entry = self.property(key)?;
+        if let KdlValue::Bool(value) = entry.value() {
+            return Some(*value);
+        }
+        let problem = Problem::new(
+            format!("`{key}` must be #true or #false, found {}", describe(entry.value())),
+            entry.span(),
+        );
+        self.problems.push(problem);
+        None
+    }
+
     /// Returns the node's block of child nodes, if it has one.
     ///
     /// Only nodes whose block is read this way may have one; [`NodeReader::finish`]
@@ -591,6 +605,17 @@ mod tests {
                 "`depth` must be a whole number, found the number 1.0",
             ]
         );
+    }
+
+    #[test]
+    fn reads_booleans() {
+        let problems = problems_for(r#"face "x" compact=#true strip=1"#, |node| {
+            let _ = node.arg_str(0, "picture");
+            assert_eq!(node.opt_bool("compact"), Some(true));
+            assert_eq!(node.opt_bool("strip"), None);
+            assert_eq!(node.opt_bool("missing"), None);
+        });
+        assert_eq!(messages(&problems), ["`strip` must be #true or #false, found the number 1"]);
     }
 
     #[test]

@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use kdl::{KdlDocument, KdlNode};
 use strum::{EnumString, IntoStaticStr, VariantNames};
 
+use super::face::{Faces, check_faces, read_face};
 use super::legend::{Legend, read_legend};
 use crate::kdl_reader::{self, NodeReader, Problem};
 
@@ -33,6 +34,8 @@ pub struct Model {
     pub ears: Ears,
     /// How many bays, power supplies, ports and other parts the device has.
     pub components: Components,
+    /// The pictures the model's front panel is drawn from.
+    pub faces: Faces,
     /// What the characters of the model's faces stand for.
     pub legend: Legend,
 }
@@ -179,7 +182,7 @@ fn read_model(id: &str, node: &KdlNode, problems: &mut Vec<Problem>) -> Option<M
     let mut depth = Depth::default();
     let mut ears = Ears::default();
     let mut components = Components::default();
-    let mut has_face = false;
+    let mut faces = Faces::default();
     let mut legend = Legend::default();
     let mut legend_span = None;
     let mut seen = HashSet::new();
@@ -220,7 +223,7 @@ fn read_model(id: &str, node: &KdlNode, problems: &mut Vec<Problem>) -> Option<M
             "ports" => components.ports = count(child, problems),
             "sfps" => components.sfps = count(child, problems),
             "outlets" => components.outlets = count(child, problems),
-            "face" => has_face = true,
+            "face" => read_face(child, &mut faces, problems),
             "legend" => {
                 legend = read_legend(child, problems);
                 legend_span = Some(child.name().span());
@@ -232,7 +235,9 @@ fn read_model(id: &str, node: &KdlNode, problems: &mut Vec<Problem>) -> Option<M
         }
     }
 
-    if let Some(span) = legend_span.filter(|_| !has_face) {
+    check_faces(&faces, mount, height, problems);
+    // A face that is present but invalid has already been reported.
+    if let Some(span) = legend_span.filter(|_| !seen.contains("face")) {
         problems.push(
             Problem::new("a `legend` needs a `face` to describe", span)
                 .with_help("add a `face` or remove the `legend`"),
@@ -260,6 +265,7 @@ fn read_model(id: &str, node: &KdlNode, problems: &mut Vec<Problem>) -> Option<M
         depth,
         ears,
         components,
+        faces,
         legend,
     })
 }
@@ -304,10 +310,12 @@ mod tests {
                 kind "server"; height 1; bays 8; psus 2; nics 4; mgmt 1
                 face #"""
                     p nnnnnnn
+                    s s
                     """#
                 legend {
                     p power
                     n name
+                    s psu
                 }
             }
         "##;
@@ -423,9 +431,10 @@ mod tests {
     }
 
     #[test]
-    fn allows_several_faces() {
-        let text = r#"model { name "X"; kind "server"; face "a"; face "b" compact=#true }"#;
-        assert!(Model::parse("x/y", text).is_ok());
+    fn allows_a_normal_and_a_compact_face() {
+        let text = r#"model { name "X"; kind "server"; face "a\nb"; face "c" compact=#true }"#;
+        let faces = Model::parse("x/y", text).expect("valid model").faces;
+        assert!(faces.normal.is_some() && faces.compact.is_some());
     }
 
     #[test]
