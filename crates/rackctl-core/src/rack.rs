@@ -4,12 +4,12 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::fmt;
 
-use kdl::{KdlDocument, KdlEntry, KdlNode, NodeKey};
+use kdl::{KdlDocument, KdlEntry, KdlNode};
 use miette::SourceSpan;
 use strum::{EnumString, IntoStaticStr, VariantNames};
 
 use crate::catalog::{Catalog, Depth, Model, ModelError, Mount};
-use crate::kdl_reader::{self, NodeReader, Problem};
+use crate::kdl_reader::{self, NodeReader, Problem, span_of};
 use crate::{IDENTIFIER_RULE, is_identifier};
 
 /// The largest number of units a rack may have.
@@ -340,14 +340,14 @@ fn read_rack(node: &KdlNode, problems: &mut Vec<Problem>) -> Option<Rack> {
         Some(units) if !(1..=MAX_UNITS).contains(&units) => {
             problems.push(Problem::new(
                 format!("`units` must be between 1 and {MAX_UNITS}"),
-                entry_span(node, "units"),
+                span_of(node, "units"),
             ));
             None
         }
         units => units,
     };
     if name.as_deref().is_some_and(|name| !is_identifier(name)) {
-        problems.push(Problem::new(format!("rack names {IDENTIFIER_RULE}"), entry_span(node, 0)));
+        problems.push(Problem::new(format!("rack names {IDENTIFIER_RULE}"), span_of(node, 0)));
     }
 
     let mut devices = Vec::new();
@@ -364,7 +364,7 @@ fn read_rack(node: &KdlNode, problems: &mut Vec<Problem>) -> Option<Rack> {
         // Ids are compared even for devices with other problems, so that a repeated id is
         // reported however many mistakes the devices have.
         if let Some(id) = child.entry(0).and_then(|entry| entry.value().as_string()) {
-            let span = entry_span(child, 0);
+            let span = span_of(child, 0);
             match ids.entry(id) {
                 Entry::Occupied(first) => problems.push(
                     Problem::new(format!("the device id `{id}` is used more than once"), span)
@@ -396,7 +396,7 @@ fn read_device(node: &KdlNode, units: Option<u8>, problems: &mut Vec<Problem>) -
     reader.finish();
 
     if id.as_deref().is_some_and(|id| !is_identifier(id)) {
-        problems.push(Problem::new(format!("device ids {IDENTIFIER_RULE}"), entry_span(node, 0)));
+        problems.push(Problem::new(format!("device ids {IDENTIFIER_RULE}"), span_of(node, 0)));
     }
     if node.entry("u").is_none() && node.entry("mount").is_none() && !u_misspelled {
         problems.push(
@@ -409,13 +409,13 @@ fn read_device(node: &KdlNode, units: Option<u8>, problems: &mut Vec<Problem>) -
         );
     }
     if u == Some(0) {
-        problems.push(Problem::new("`u` must be at least 1", entry_span(node, "u")));
+        problems.push(Problem::new("`u` must be at least 1", span_of(node, "u")));
     }
     if let (Some(u), Some(units)) = (u, units)
         && u > units
     {
         problems.push(
-            Problem::new(format!("`u` is above the top of the rack: {u}"), entry_span(node, "u"))
+            Problem::new(format!("`u` is above the top of the rack: {u}"), span_of(node, "u"))
                 .with_label(format!("the rack has {units} units")),
         );
     }
@@ -426,18 +426,12 @@ fn read_device(node: &KdlNode, units: Option<u8>, problems: &mut Vec<Problem>) -
     };
     let spans = DeviceSpans {
         node: node.span(),
-        id: entry_span(node, 0),
-        model: entry_span(node, "model"),
+        id: span_of(node, 0),
+        model: span_of(node, "model"),
         u: node.entry("u").map(KdlEntry::span),
         mount: node.entry("mount").map(KdlEntry::span),
     };
     Some(Device { id: id?, model: model?, placement, face, spans })
-}
-
-/// Returns the location of an argument or property of `node`, or of the node's name when
-/// the entry is absent.
-fn entry_span(node: &KdlNode, key: impl Into<NodeKey>) -> SourceSpan {
-    node.entry(key).map_or_else(|| node.name().span(), KdlEntry::span)
 }
 
 #[cfg(test)]

@@ -13,7 +13,7 @@ use std::io;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
+use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue, NodeKey};
 use miette::{Diagnostic, LabeledSpan, NamedSource, Report, SourceSpan};
 use strum::VariantNames;
 use thiserror::Error;
@@ -235,6 +235,12 @@ pub fn parse_single<T>(
         Some(value) if problems.is_empty() => Ok(value),
         _ => Err(problems),
     }
+}
+
+/// Returns the location of an argument or property of `node`, or of the node's name when
+/// the entry is absent.
+pub fn span_of(node: &KdlNode, key: impl Into<NodeKey>) -> SourceSpan {
+    node.entry(key).map_or_else(|| node.name().span(), KdlEntry::span)
 }
 
 /// Reads the arguments and properties of a single KDL node.

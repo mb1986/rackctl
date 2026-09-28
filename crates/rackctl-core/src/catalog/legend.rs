@@ -2,11 +2,11 @@
 
 use std::collections::BTreeSet;
 
-use kdl::{KdlDocument, KdlEntry, KdlIdentifier, KdlNode, NodeKey};
+use kdl::{KdlDocument, KdlEntry, KdlIdentifier, KdlNode};
 use miette::SourceSpan;
 use strum::{EnumString, IntoStaticStr, VariantNames};
 
-use crate::kdl_reader::{NodeReader, Problem, Spanned};
+use crate::kdl_reader::{NodeReader, Problem, Spanned, span_of};
 
 /// The legend of a model's faces: one entry per key character.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -507,12 +507,6 @@ fn parsed<T>(
             None
         }
     }
-}
-
-/// Returns the location of an argument or property of `node`, or of the whole node when
-/// the entry is absent.
-fn span_of(node: &KdlNode, key: impl Into<NodeKey>) -> SourceSpan {
-    node.entry(key).map_or_else(|| node.span(), KdlEntry::span)
 }
 
 /// Returns the location of what is written of `node`, from its name to its last value,
