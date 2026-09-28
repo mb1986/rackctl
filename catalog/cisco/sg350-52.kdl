@@ -1,6 +1,6 @@
 model {
   name "Cisco SG350-52"; short "SG350-52"
-  kind "switch"; height 1; depth "half"; ports 50; sfps 4
+  kind "switch"; height 1; depth "half"; ports 52
 
   face #"""
      p ~[nnnnnn][nnnnnn][nnnnnn][nnnnnn] [g]-[s] [s]
@@ -12,7 +12,7 @@ model {
     t text="52"
     n port
     g port numbers="49-50" order="down"
-    s sfp numbers="49-52" order="down"
+    s port media="sfp" numbers="49-52" order="down"
     ~ fill
   }
 }

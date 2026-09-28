@@ -1,6 +1,6 @@
 model {
   name "Ubiquiti EdgeRouter 6P"; short "ER 6P"
-  kind "router"; height 1; depth "half"; ports 5; sfps 1
+  kind "router"; height 1; depth "half"; ports 6
 
   face #"""
      p nnnnnnnn ~𜹸 𜹸 𜹸 𜹸 𜹸  𜹰  [𜲅] 𜲄 [l l l l l] [s].
@@ -12,7 +12,7 @@ model {
     n name
     h short
     l port first=0
-    s sfp numbers="5"
+    s port media="sfp" numbers="5"
     ~ fill
     . space
   }
