@@ -1,7 +1,5 @@
 //! Faces: the pictures a model's front panel is drawn from.
 
-use std::collections::BTreeSet;
-
 use kdl::{KdlEntry, KdlNode};
 use miette::SourceSpan;
 use unicode_width::UnicodeWidthChar;
@@ -25,12 +23,6 @@ pub struct Faces {
 }
 
 impl Faces {
-    /// Returns whether the model has any face.
-    #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        self.normal.is_none() && self.compact.is_none() && self.strip.is_none()
-    }
-
     /// Returns the faces the model has.
     pub fn iter(&self) -> impl Iterator<Item = &Face> {
         [&self.normal, &self.compact, &self.strip].into_iter().flatten()
@@ -83,6 +75,8 @@ pub struct Face {
     /// The cells of each row, from the top. Rows may differ in length.
     cells: Vec<Vec<Cell>>,
     elements: Vec<Element>,
+    /// The elements that are not rectangles, already reported.
+    irregular: Vec<usize>,
 }
 
 /// One cell of a face: a character drawn as it is, or part of an element.
@@ -172,41 +166,62 @@ impl Face {
         self.span_at(row, 0, count)
     }
 
+    /// Returns the location of the bytes `from..to` of row `row` in the model file, or of the
+    /// whole picture when the row cannot be located.
+    fn bytes_span(&self, row: usize, from: usize, to: usize) -> SourceSpan {
+        match self.row_offsets.get(row) {
+            Some(&Some(start)) => SourceSpan::from(start + from..start + to),
+            _ => self.span,
+        }
+    }
+
     /// Cuts the picture into cells and elements. A character that is a legend key starts an
-    /// element, `_` extends the element on its left and `|` the element above it, and any
-    /// other character is drawn as it is.
+    /// element; `_` extends the LED, numbered element or text on its left, and `|` the LED
+    /// or numbered element above it; any other character is drawn as it is.
     fn cut(&mut self, legend: &Legend, problems: &mut Vec<Problem>) {
+        // The byte offset of each character of each row, and of the row's end.
+        let offsets: Vec<Vec<usize>> = self
+            .rows
+            .iter()
+            .map(|text| text.char_indices().map(|(byte, _)| byte).chain([text.len()]).collect())
+            .collect();
         let mut cells: Vec<Vec<Cell>> = Vec::with_capacity(self.rows.len());
         let mut elements: Vec<Element> = Vec::new();
         for (row, text) in self.rows.iter().enumerate() {
             let mut line: Vec<Cell> = Vec::with_capacity(text.len());
             for (column, character) in text.chars().enumerate() {
-                let span = self.span_at(row, column, 1);
+                let span = self.bytes_span(row, offsets[row][column], offsets[row][column + 1]);
                 problems.extend(width_problem(character, span));
+                let above = row.checked_sub(1).and_then(|up| cells.get(up)?.get(column)).copied();
                 let cell = match character {
                     '_' => match line.last() {
                         Some(&Cell::Element(index)) if extends_along(elements[index].part) => {
                             elements[index].cover(row, column);
                             Cell::Element(index)
                         }
+                        // A run of stray `_` is reported once.
+                        Some(Cell::Literal('_')) => Cell::Literal('_'),
                         _ => {
                             problems.push(nothing_to_continue('_', span));
                             Cell::Literal('_')
                         }
                     },
-                    '|' => {
-                        let above = row.checked_sub(1).and_then(|up| cells.get(up)?.get(column));
-                        match above {
-                            Some(&Cell::Element(index)) if extends_down(elements[index].part) => {
-                                elements[index].cover(row, column);
-                                Cell::Element(index)
-                            }
-                            _ => {
-                                problems.push(nothing_to_continue('|', span));
-                                Cell::Literal('|')
-                            }
+                    '|' => match above {
+                        Some(Cell::Element(index)) if extends_down(elements[index].part) => {
+                            elements[index].cover(row, column);
+                            Cell::Element(index)
                         }
-                    }
+                        // Stray `|` next to or under another one are reported once.
+                        _ if above == Some(Cell::Literal('|'))
+                            || line.last() == Some(&Cell::Literal('|')) =>
+                        {
+                            Cell::Literal('|')
+                        }
+                        _ => {
+                            problems.push(nothing_to_continue('|', span));
+                            Cell::Literal('|')
+                        }
+                    },
                     key => {
                         let Some(entry) = legend.get(key) else {
                             line.push(Cell::Literal(key));
@@ -246,15 +261,36 @@ impl Face {
             cells.push(line);
         }
 
+        let irregular = self.check_rectangles(&offsets, &cells, &mut elements, problems);
+        link_number_fields(&cells, &mut elements, legend, problems);
+        self.cells = cells;
+        self.elements = elements;
+        self.irregular = irregular;
+    }
+
+    /// Sets each element's location to its top row, reports the elements that are not
+    /// rectangles and returns their indices.
+    fn check_rectangles(
+        &self,
+        offsets: &[Vec<usize>],
+        cells: &[Vec<Cell>],
+        elements: &mut [Element],
+        problems: &mut Vec<Problem>,
+    ) -> Vec<usize> {
         let mut counts = vec![0; elements.len()];
         for cell in cells.iter().flatten() {
             if let Cell::Element(index) = cell {
                 counts[*index] += 1;
             }
         }
-        for (element, count) in elements.iter_mut().zip(counts) {
-            element.span = self.span_at(element.row, element.column, element.width);
+        let mut irregular = Vec::new();
+        for (index, (element, count)) in elements.iter_mut().zip(counts).enumerate() {
+            let row = &offsets[element.row];
+            let end =
+                row.get(element.column + element.width).copied().unwrap_or(row[row.len() - 1]);
+            element.span = self.bytes_span(element.row, row[element.column], end);
             if count != element.width * element.height {
+                irregular.push(index);
                 problems.push(
                     Problem::new("this element is not a rectangle", element.span).with_help(
                         "`_` extends an element along its row and `|` down its column; every \
@@ -263,9 +299,7 @@ impl Face {
                 );
             }
         }
-        link_number_fields(&cells, &mut elements, legend, problems);
-        self.cells = cells;
-        self.elements = elements;
+        irregular
     }
 }
 
@@ -297,13 +331,13 @@ fn link_number_fields(
             _ => None,
         };
         let span = field.span;
-        let room = field.width > gap;
         if let Some(message) = problem {
             problems.push(Problem::new(message, span).with_help(
                 "put it directly on the left or right of one numbered element, as in `###o`",
             ));
+            continue;
         }
-        if !room {
+        if field.width <= gap {
             problems.push(Problem::new(
                 format!("this number field has no room for a number besides its `gap={gap}`"),
                 span,
@@ -389,12 +423,21 @@ pub fn read_face(node: &KdlNode, faces: &mut Faces, problems: &mut Vec<Problem>)
         );
         return;
     }
-    *slot = Some(Face { kind, span, rows, row_offsets, cells: Vec::new(), elements: Vec::new() });
+    *slot = Some(Face {
+        kind,
+        span,
+        rows,
+        row_offsets,
+        cells: Vec::new(),
+        elements: Vec::new(),
+        irregular: Vec::new(),
+    });
 }
 
 /// Checks the faces against the model: strips only on side-mounted models, and the number
 /// and width of the rows. A face of the wrong kind for the model is reported and dropped, so
-/// that it is not checked any further.
+/// that it is not checked any further. `height` is `None` for an invalid height, and then the
+/// number of rows is not checked.
 pub fn check_faces(
     faces: &mut Faces,
     mount: Mount,
@@ -417,7 +460,11 @@ pub fn check_faces(
                     ),
                     face.span,
                 )
-                .with_help("add `strip=#true` to the face"),
+                .with_help(if face.kind == FaceKind::Compact {
+                    "replace `compact=#true` with `strip=#true`"
+                } else {
+                    "add `strip=#true` to the face"
+                }),
             ),
             _ => None,
         };
@@ -426,13 +473,12 @@ pub fn check_faces(
             *slot = None;
             continue;
         }
-        let height = usize::from(height.unwrap_or(1));
-        let expected = match face.kind {
-            FaceKind::Normal => Some(height * 2),
-            FaceKind::Compact => Some(height),
-            FaceKind::Strip => None,
+        let expected = match (face.kind, height.map(usize::from)) {
+            (FaceKind::Normal, Some(height)) => Some((height, height * 2)),
+            (FaceKind::Compact, Some(height)) => Some((height, height)),
+            _ => None,
         };
-        if let Some(expected) = expected.filter(|&expected| expected != face.rows.len()) {
+        if let Some((height, expected)) = expected.filter(|&(_, rows)| rows != face.rows.len()) {
             let rows = |count: usize| {
                 if count == 1 { "1 row".to_owned() } else { format!("{count} rows") }
             };
@@ -471,26 +517,44 @@ pub fn cut_faces(faces: &mut Faces, legend: &Legend, problems: &mut Vec<Problem>
 /// Checks that every glyph fits the elements drawn with it: each of its characters is one
 /// column wide, and it is one character, which fills the element, or one per cell.
 pub fn check_glyphs(faces: &Faces, legend: &Legend, problems: &mut Vec<Problem>) {
+    // Elements that are not rectangles have no size to compare with; they are reported.
+    let elements: Vec<&Element> = faces
+        .iter()
+        .flat_map(|face| {
+            face.elements.iter().enumerate().filter(|(index, _)| !face.irregular.contains(index))
+        })
+        .map(|(_, element)| element)
+        .collect();
     for entry in legend.entries() {
-        let cells: BTreeSet<usize> = faces
-            .iter()
-            .flat_map(Face::elements)
-            .filter(|element| element.key == entry.key)
-            .map(|element| element.width * element.height)
-            .collect();
         for glyph in entry.glyphs() {
-            problems.extend(glyph.value.chars().find_map(|c| width_problem(c, glyph.span)));
+            // The legend reports control characters and this reports wide ones; a glyph with
+            // either is not size checked.
+            if glyph.value.chars().any(|c| c.width() != Some(1)) {
+                problems.extend(
+                    glyph
+                        .value
+                        .chars()
+                        .filter(|c| c.width().is_some())
+                        .find_map(|c| width_problem(c, glyph.span)),
+                );
+                continue;
+            }
             let length = glyph.value.chars().count();
-            if let Some(size) = cells.iter().find(|&&size| length > 1 && size != length) {
+            let misfit = elements.iter().find(|element| {
+                element.key == entry.key && length > 1 && element.width * element.height != length
+            });
+            if let Some(element) = misfit {
+                let cells = element.width * element.height;
+                let cells = if cells == 1 { "1 cell".to_owned() } else { format!("{cells} cells") };
                 problems.push(
                     Problem::new(
                         format!(
-                            "this glyph has {length} characters, but a `{}` element covers {size} \
-                             cells",
+                            "this glyph has {length} characters, but a `{}` element covers {cells}",
                             entry.key
                         ),
                         glyph.span,
                     )
+                    .with_label_at(element.span, format!("covers {cells}"))
                     .with_help(
                         "a glyph is one character, which fills the element, or one per cell",
                     ),
@@ -515,29 +579,60 @@ pub fn check_unused_keys(faces: &Faces, legend: &Legend, problems: &mut Vec<Prob
     }
 }
 
-/// Finds where each row of a picture starts in the model file, so that problems can point at
-/// single characters. The rows appear in the picture's text as written in the file, in
-/// order, so each one is searched for after the one before. A row that is empty, or cannot
-/// be found as written, is not located.
+/// Finds where each non-empty row of a picture starts in the model file. Rows from the first
+/// one not written as it is, such as one with an escape, are not located.
 fn locate_rows(entry: &KdlEntry, rows: &[String]) -> Vec<Option<usize>> {
+    let mut starts = vec![None; rows.len()];
     let Some(written) = entry.format().map(|format| format.value_repr.as_str()) else {
-        return vec![None; rows.len()];
+        return starts;
     };
-    let mut from = 0;
-    rows.iter()
-        .map(|row| {
-            if row.is_empty() {
-                return None;
-            }
-            let found = from + written.get(from..)?.find(row.as_str())?;
-            from = found + row.len();
-            Some(entry.span().offset() + found)
-        })
-        .collect()
+    if rows.is_empty() {
+        return starts;
+    }
+    // The entry's span may start with a type annotation, but it ends where the value does.
+    let span = entry.span();
+    let offset = span.offset() + span.len() - written.len();
+    let lines = kdl_lines(written);
+    // A multi-line picture ends with a line holding only the indent and the closing quotes.
+    let Some(&(_, last)) = lines.last().filter(|_| lines.len() > 1) else {
+        let row = rows[0].as_str();
+        let at = written.find('"').map(|at| at + 1).filter(|_| !row.is_empty());
+        starts[0] = at.filter(|&at| written[at..].starts_with(row)).map(|at| offset + at);
+        return starts;
+    };
+    let indent = last.len() - last.trim_start().len();
+    for (&(start, line), (row, slot)) in lines[1..].iter().zip(rows.iter().zip(&mut starts)) {
+        if row.is_empty() && line.trim().is_empty() {
+            continue;
+        }
+        if line.get(indent..) != Some(row.as_str()) {
+            break;
+        }
+        *slot = Some(offset + start + indent);
+    }
+    starts
+}
+
+/// Splits text at the newlines KDL accepts, giving where each line starts and its text.
+fn kdl_lines(text: &str) -> Vec<(usize, &str)> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+    let mut chars = text.char_indices().peekable();
+    while let Some((at, c)) = chars.next() {
+        if matches!(c, '\n' | '\r' | '\u{0B}' | '\u{0C}' | '\u{85}' | '\u{2028}' | '\u{2029}') {
+            lines.push((start, &text[start..at]));
+            let crlf = c == '\r' && chars.next_if(|&(_, next)| next == '\n').is_some();
+            start = at + c.len_utf8() + usize::from(crlf);
+        }
+    }
+    lines.push((start, &text[start..]));
+    lines
 }
 
 #[cfg(test)]
 mod tests {
+    use miette::Diagnostic;
+
     use super::*;
     use crate::catalog::Model;
 
@@ -593,13 +688,184 @@ mod tests {
 
     #[test]
     fn falls_back_to_the_whole_picture_for_rows_written_with_escapes() {
+        // The first row is written with an escape, so neither row is located.
         let text =
             r#"model { name "X"; kind "server"; face "p\u{62}\nbb"; legend { p power; b bay } }"#;
         let normal = model(text).faces.normal.expect("normal face");
         assert_eq!(normal.rows().collect::<Vec<_>>(), ["pb", "bb"]);
         assert_eq!(normal.span_at(0, 0, 1), normal.span);
-        let span = normal.span_at(1, 0, 2);
-        assert_eq!(&text[span.offset()..span.offset() + span.len()], "bb");
+        assert_eq!(normal.span_at(1, 0, 2), normal.span);
+        // A picture written on one line has only its first row located, so a row of `n`
+        // cannot be found inside the `\n` escape before it.
+        let text =
+            r#"model { name "X"; kind "server"; face "p\nnnnn"; legend { p power; n name } }"#;
+        let normal = model(text).faces.normal.expect("normal face");
+        let span = normal.span_at(0, 0, 1);
+        assert_eq!(&text[span.offset()..span.offset() + span.len()], "p");
+        assert_eq!(normal.span_at(1, 0, 4), normal.span);
+    }
+
+    /// Where `locate_rows` finds the rows of the picture in `text`, a single `face` node.
+    fn located(text: &str) -> Vec<Option<usize>> {
+        let document = kdl::KdlDocument::parse_v2(text).expect("valid KDL");
+        let entry = document.nodes()[0].entry(0).expect("a picture");
+        let picture = entry.value().as_string().expect("a string");
+        let rows: Vec<String> = picture.split('\n').map(str::to_owned).collect();
+        locate_rows(entry, &rows)
+    }
+
+    #[test]
+    fn locates_rows_of_a_picture_written_over_several_lines() {
+        // CRLF, a blank row and a row indented more than the others.
+        let text = "face #\"\"\"\r\n    p nn\r\n\r\n      bb\r\n    \"\"\"#";
+        assert_eq!(located(text), [text.find("p nn"), None, text.find("  bb")]);
+        // Newlines other than LF, and a row that could be taken for the opening quotes.
+        let text = "face #\"\"\"\u{85}  #\u{2028}  ab\u{2028}  \"\"\"#";
+        assert_eq!(located(text), [text.find("\u{85}  #").map(|at| at + 4), text.find("ab")]);
+    }
+
+    #[test]
+    fn locates_the_row_of_a_picture_written_on_one_line() {
+        assert_eq!(located(r#"face "p nn""#), [Some(6)]);
+        assert_eq!(located(r##"face #"a"b"#"##), [Some(7)]);
+        assert_eq!(located(r#"face """#), [None]);
+        assert_eq!(located(r#"face (pic)"p nn""#), [Some(11)]);
+    }
+
+    #[test]
+    fn stops_locating_rows_at_the_first_one_written_with_an_escape() {
+        let text = "face \"\"\"\n  ab\n  c\\\"d\n  ef\n  \"\"\"";
+        assert_eq!(located(text), [text.find("ab"), None, None]);
+        // A `\` at the end of a line joins it to the next one.
+        let text = "face \"\"\"\n  ab\\\n  cd\n  ef\n  \"\"\"";
+        assert_eq!(located(text), [None, None]);
+    }
+
+    /// The text of the model file each problem points at, with its message.
+    fn pointed(text: &str) -> Vec<(String, String)> {
+        Model::parse("x/y", text)
+            .expect_err("the model has problems")
+            .iter()
+            .map(|p| {
+                let span = p.span();
+                (p.message().to_owned(), text[span.offset()..span.offset() + span.len()].to_owned())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn reports_a_run_of_stray_underscores_and_bars_once() {
+        // `x__` has one stray run, the `|` under the `x` is stray, and so is the `||` under
+        // the text field, which `|` cannot extend.
+        let text = server(["x__ tt", "|   ||"], "t short");
+        assert_eq!(
+            messages(&text),
+            [
+                "`_` has nothing on its left to continue",
+                "`|` has nothing above it to continue",
+                "`|` has nothing above it to continue",
+            ]
+        );
+        let stray = pointed(&text);
+        assert_eq!(stray.iter().map(|(_, at)| at.as_str()).collect::<Vec<_>>(), ["_", "|", "|"]);
+    }
+
+    #[test]
+    fn reports_a_bad_glyph_once() {
+        let text = server(["b__ b_", "~"], r#"b bay="a\u{301}"; ~ fill"#);
+        assert_eq!(
+            messages(&text),
+            ["`\\u{301}` is 0 columns wide; every character must be one column"]
+        );
+        // Two characters for three cells, but the control character is all that is reported.
+        let text = server(["b__", "~"], r#"b bay="a\t"; ~ fill"#);
+        assert_eq!(messages(&text), ["a glyph must not contain control characters"]);
+    }
+
+    #[test]
+    fn does_not_size_check_elements_that_are_not_rectangles() {
+        let text = server(["b_", "| "], r#"b bay="abc""#);
+        assert_eq!(messages(&text), ["this element is not a rectangle"]);
+    }
+
+    #[test]
+    fn points_at_the_glyph_and_the_element_it_does_not_fit() {
+        let text = server(["b_ b", "~"], r#"b bay="ab"; ~ fill"#);
+        let problems = Model::parse("x/y", &text).expect_err("glyph that does not fit");
+        assert_eq!(problems.len(), 1);
+        assert_eq!(
+            problems[0].message(),
+            "this glyph has 2 characters, but a `b` element covers 1 cell"
+        );
+        let labels: Vec<_> = problems[0]
+            .labels()
+            .expect("labels")
+            .map(|label| &text[label.offset()..label.offset() + label.len()])
+            .collect();
+        assert_eq!(labels, [r#"bay="ab""#, "b"]);
+    }
+
+    #[test]
+    fn reports_an_invalid_height_once() {
+        // Four rows would be too many for 1U, but no face is checked against an invalid height.
+        let model = |height| {
+            format!(
+                r#"model {{ name "X"; kind "server"; height {height}; face "p\nb\nb\nb"; legend {{ p power; b bay }} }}"#
+            )
+        };
+        assert_eq!(messages(&model("0")), ["`height` must be at least 1"]);
+        assert_eq!(messages(&model("\"2\"")).len(), 1);
+    }
+
+    #[test]
+    fn reports_only_that_a_lone_number_field_touches_nothing() {
+        let text = server(["#", "~"], r##""#" number gap=1; ~ fill"##);
+        assert_eq!(
+            messages(&text),
+            ["a number field must touch a bay, port or other numbered element"]
+        );
+    }
+
+    #[test]
+    fn does_not_number_leds_or_text() {
+        let text = server(["##p #t", "~"], r##""#" number; p power; t short; ~ fill"##);
+        assert_eq!(
+            messages(&text),
+            [
+                "a number field must touch a bay, port or other numbered element",
+                "a number field must touch a bay, port or other numbered element",
+            ]
+        );
+    }
+
+    #[test]
+    fn points_number_field_problems_at_the_field() {
+        let text = server(["b##b", "~"], r##""#" number; b bay; ~ fill"##);
+        assert_eq!(
+            pointed(&text),
+            [(
+                "this number field touches numbered elements on both sides".to_owned(),
+                "##".to_owned()
+            )]
+        );
+    }
+
+    #[test]
+    fn suggests_replacing_compact_on_a_side_mounted_model() {
+        let text = r#"model { name "S"; kind "pdu"; mount "side"; face compact=#true "p"; legend { p power } }"#;
+        let problems = Model::parse("x/y", text).expect_err("compact face on a strip");
+        assert_eq!(problems[0].help(), Some("replace `compact=#true` with `strip=#true`"));
+    }
+
+    #[test]
+    fn holds_back_unused_keys_while_the_model_has_other_problems() {
+        let text = server(["p", "~"], "p power; b bay; ~ fill");
+        assert_eq!(
+            pointed(&text),
+            [("legend key `b` is not used by any face".to_owned(), "b bay".to_owned())]
+        );
+        let with_other_problem = server(["_p", "~"], "p power; b bay; ~ fill");
+        assert!(!messages(&with_other_problem).iter().any(|m| m.contains("not used")));
     }
 
     #[test]
@@ -769,6 +1035,14 @@ mod tests {
                 "`中` is 2 columns wide; every character must be one column",
                 "control characters such as `\\t` cannot be drawn",
             ]
+        );
+        let text = server(["中b", "~"], "b bay; ~ fill");
+        assert_eq!(
+            pointed(&text),
+            [(
+                "`中` is 2 columns wide; every character must be one column".to_owned(),
+                "中".to_owned()
+            )]
         );
     }
 

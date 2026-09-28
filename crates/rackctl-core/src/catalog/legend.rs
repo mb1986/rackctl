@@ -372,7 +372,7 @@ fn read_entry(node: &KdlNode, key: char, problems: &mut Vec<Problem>) -> Option<
         gap,
         outlet_type: outlet_type.map(|value| value.value),
         rating: rating.map(|value| value.value),
-        span: node.span(),
+        span: written_span(node),
         glyph,
         state_glyphs,
     };
@@ -513,6 +513,14 @@ fn parsed<T>(
 /// the entry is absent.
 fn span_of(node: &KdlNode, key: impl Into<NodeKey>) -> SourceSpan {
     node.entry(key).map_or_else(|| node.span(), KdlEntry::span)
+}
+
+/// Returns the location of what is written of `node`, from its name to its last value,
+/// without the whitespace around it.
+fn written_span(node: &KdlNode) -> SourceSpan {
+    let name = node.name().span();
+    let last = node.entries().last().map_or(name, KdlEntry::span);
+    SourceSpan::from(name.offset()..last.offset() + last.len())
 }
 
 /// Reads the key of a legend entry: a single ASCII letter or punctuation character.

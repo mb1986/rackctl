@@ -207,6 +207,8 @@ fn read_model(id: &str, node: &KdlNode, problems: &mut Vec<Problem>) -> Option<M
                 height = single(child, problems, |n| n.arg_int::<u8>(0, "height"));
                 if height == Some(0) {
                     problems.push(Problem::new("`height` must be at least 1", child.span()));
+                    // Reported once, so the faces are not checked against it.
+                    height = None;
                 }
             }
             "mount" => {
@@ -235,7 +237,9 @@ fn read_model(id: &str, node: &KdlNode, problems: &mut Vec<Problem>) -> Option<M
         }
     }
 
-    check_faces(&mut faces, mount, height, problems);
+    // A model without a height is 1U; an invalid one has been reported.
+    let face_height = if seen.contains("height") { height } else { Some(1) };
+    check_faces(&mut faces, mount, face_height, problems);
     cut_faces(&mut faces, &legend, problems);
     check_glyphs(&faces, &legend, problems);
     // A face that is present but invalid has already been reported.
