@@ -1,0 +1,19 @@
+[package]
+name = "rackctl-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Terminal user interface for rackctl"
+publish.workspace = true
+
+[dependencies]
+rackctl-core.workspace = true
+
+[dev-dependencies]
+indoc.workspace = true
+
+[lints]
+workspace = true
