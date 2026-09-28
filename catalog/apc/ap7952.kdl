@@ -11,58 +11,58 @@ model {
     N[n]
 
 
-     1 x
+    ###x
 
 
-     2 o
+    ###o
 
-     3 o
+    ###o
 
-     4 o
+    ###o
 
-     5 o
+    ###o
 
-     6 o
+    ###o
 
-     7 o
+    ###o
 
-     8 o
-
-
-     9 x
+    ###o
 
 
-    10 o
-
-    11 o
-
-    12 o
-
-    13 o
-
-    14 o
-
-    15 o
-
-    16 o
+    ###x
 
 
-    17 x
+    ###o
+
+    ###o
+
+    ###o
+
+    ###o
+
+    ###o
+
+    ###o
+
+    ###o
 
 
-    18 o
+    ###x
 
-    19 o
 
-    20 o
+    ###o
 
-    21 o
+    ###o
 
-    22 o
+    ###o
 
-    23 o
+    ###o
 
-    24 o
+    ###o
+
+    ###o
+
+    ###o
     ~
     """#
 
@@ -73,8 +73,8 @@ model {
     a amps align="right"
     o outlet order="down" type="C13" rating="10A"
     x outlet="█" order="down" type="C19" rating="16A" numbers="1,9,17"
+    "#" number gap=1
     n nic
     ~ fill
-    . space
   }
 }
