@@ -19,9 +19,17 @@ struct Position {
 
 /// The legend entries of one numbered part, which share the part's declared count, such as
 /// `ports 52`. Each group of entries has its own numbers.
-struct Numbering<'l> {
+struct NumberedPart<'l> {
     part: Part,
     groups: Vec<Group<'l>>,
+}
+
+/// The elements a face shows of one legend entry, in numbering order, as positions in
+/// [`Face::elements`], with the entry's group as a position in [`NumberedPart::groups`].
+struct Shown<'l> {
+    group: usize,
+    entry: &'l LegendEntry,
+    elements: Vec<usize>,
 }
 
 /// The legend entries of a part in one group, such as the ports of group `XG`.
@@ -38,10 +46,15 @@ impl Group<'_> {
         self.entries.iter().copied().find(|entry| entry.numbering.numbers.is_none())
     }
 
-    /// Names the group's elements in messages, such as `outlets` or ``ports in group `XG` ``.
-    fn describe(&self, part: Part) -> String {
+    /// Names the group's elements in messages, such as `outlets` or ``ports in group `XG` ``,
+    /// or `count` of them, such as `1 outlet`.
+    fn describe(&self, part: Part, count: Option<usize>) -> String {
         let (name, _) = names(part);
-        self.name.map_or_else(|| format!("{name}s"), |group| format!("{name}s in group `{group}`"))
+        let elements = count.map_or_else(|| format!("{name}s"), |count| plural(count, name));
+        match self.name {
+            Some(group) => format!("{elements} in group `{group}`"),
+            None => elements,
+        }
     }
 }
 
@@ -103,13 +116,13 @@ pub fn number_faces(
     components: &Components,
     problems: &mut Vec<Problem>,
 ) {
-    let numberings = numberings(legend, problems);
+    let parts = numbered_parts(legend, problems);
     // A legend value that fits no face, such as a wrong `layout=`, is reported once.
     let mut reported: Vec<SourceSpan> = Vec::new();
     for face in faces.iter_mut() {
-        for numbering in &numberings {
+        for numbered in &parts {
             let mut found = Vec::new();
-            let shown = number_part(face, numbering, &mut found);
+            let shown = number_part(face, numbered, &mut found);
             for problem in found {
                 if !reported.contains(&problem.span()) {
                     reported.push(problem.span());
@@ -117,13 +130,13 @@ pub fn number_faces(
                 }
             }
             if problems.is_empty() && !shown.is_empty() {
-                check_numbers(face, numbering, &shown, components, problems);
+                check_numbers(face, numbered, &shown, components, problems);
             }
         }
     }
     if problems.is_empty() {
-        for numbering in &numberings {
-            check_faces_agree(faces, numbering, problems);
+        for numbered in &parts {
+            check_faces_agree(faces, numbered, problems);
         }
     }
 }
@@ -131,30 +144,28 @@ pub fn number_faces(
 /// Reports faces that split a part's numbers differently between its groups. Complete tables
 /// can only differ there: the listed numbers are the same on every face, and the free ones
 /// count up the same way.
-fn check_faces_agree(faces: &Faces, numbering: &Numbering<'_>, problems: &mut Vec<Problem>) {
-    let mut tables = faces.iter().filter_map(|face| Some((face, face.numbers(numbering.part)?)));
-    let Some((first, reference)) = tables.next() else { return };
+fn check_faces_agree(faces: &Faces, numbered: &NumberedPart<'_>, problems: &mut Vec<Problem>) {
     let sizes = |numbers: &Numbers| -> Vec<usize> {
         numbers.segments.iter().map(|segment| segment.size).collect()
     };
-    let (name, _) = names(numbering.part);
-    for (face, numbers) in tables.filter(|(_, numbers)| sizes(numbers) != sizes(reference)) {
-        let shown: Vec<String> = numbering
-            .groups
-            .iter()
-            .zip(sizes(numbers))
-            .map(|(group, size)| {
-                let in_group = group.name.map(|name| format!(" in group `{name}`"));
-                format!("{}{}", plural(size, name), in_group.unwrap_or_default())
-            })
-            .collect();
-        let expected: Vec<String> = sizes(reference).iter().map(ToString::to_string).collect();
+    let mut tables = faces.iter().filter_map(|face| Some((face, face.numbers(numbered.part)?)));
+    let Some((first, reference)) = tables.next() else { return };
+    let expected = sizes(reference);
+    for (face, numbers) in tables {
+        let found = sizes(numbers);
+        if found == expected {
+            continue;
+        }
+        let groups = numbered.groups.iter().zip(&found);
+        let found: Vec<String> =
+            groups.map(|(group, &size)| group.describe(numbered.part, Some(size))).collect();
+        let expected: Vec<String> = expected.iter().map(ToString::to_string).collect();
         problems.push(
             Problem::new(
                 format!(
                     "the {} face shows {}, but the {} face shows {}",
                     face.kind.name(),
-                    shown.join(" and "),
+                    found.join(" and "),
                     first.kind.name(),
                     expected.join(" and ")
                 ),
@@ -168,35 +179,35 @@ fn check_faces_agree(faces: &Faces, numbering: &Numbering<'_>, problems: &mut Ve
 /// Sorts the numbered legend entries by part and group, and, while nothing else has been
 /// reported, reports a group with two entries without `numbers=`, or a number listed twice
 /// on the same media.
-fn numberings<'l>(legend: &'l Legend, problems: &mut Vec<Problem>) -> Vec<Numbering<'l>> {
+fn numbered_parts<'l>(legend: &'l Legend, problems: &mut Vec<Problem>) -> Vec<NumberedPart<'l>> {
     let check = problems.is_empty();
-    let mut numberings: Vec<Numbering<'l>> = Vec::new();
+    let mut parts: Vec<NumberedPart<'l>> = Vec::new();
     for entry in legend.entries().filter(|entry| entry.part.kind() == PartKind::List) {
-        let at = numberings.iter().position(|numbering| numbering.part == entry.part);
+        let at = parts.iter().position(|numbered| numbered.part == entry.part);
         let at = at.unwrap_or_else(|| {
-            numberings.push(Numbering { part: entry.part, groups: Vec::new() });
-            numberings.len() - 1
+            parts.push(NumberedPart { part: entry.part, groups: Vec::new() });
+            parts.len() - 1
         });
-        let numbering = &mut numberings[at];
+        let numbered = &mut parts[at];
         let name = entry.numbering.group.as_deref();
-        let at = numbering.groups.iter().position(|group| group.name == name);
+        let at = numbered.groups.iter().position(|group| group.name == name);
         let at = at.unwrap_or_else(|| {
-            numbering.groups.push(Group { name, entries: Vec::new(), listed: Vec::new() });
-            numbering.groups.len() - 1
+            numbered.groups.push(Group { name, entries: Vec::new(), listed: Vec::new() });
+            numbered.groups.len() - 1
         });
-        let group = &mut numbering.groups[at];
+        let group = &mut numbered.groups[at];
         if check {
-            check_entry(numbering.part, group, entry, problems);
+            check_entry(numbered.part, group, entry, problems);
         }
         group.entries.push(entry);
     }
-    for group in numberings.iter_mut().flat_map(|numbering| &mut numbering.groups) {
+    for group in parts.iter_mut().flat_map(|numbered| &mut numbered.groups) {
         let lists = group.entries.iter().filter_map(|entry| entry.numbering.numbers.as_ref());
         group.listed = lists.flat_map(|numbers| numbers.value.iter().copied()).collect();
         group.listed.sort_unstable();
         group.listed.dedup();
     }
-    numberings
+    parts
 }
 
 /// Checks a legend entry against the entries of its group before it: only one of them may
@@ -210,7 +221,7 @@ fn check_entry(part: Part, group: &Group<'_>, entry: &LegendEntry, problems: &mu
                         "`{}` and `{}` both number the {} from `first`",
                         other.key,
                         entry.key,
-                        group.describe(part)
+                        group.describe(part, None)
                     ),
                     entry.span,
                 )
@@ -221,10 +232,16 @@ fn check_entry(part: Part, group: &Group<'_>, entry: &LegendEntry, problems: &mu
         }
         return;
     };
+    let mut sorted = numbers.value.clone();
+    sorted.sort_unstable();
     for other in group.entries.iter().filter(|other| other.media == entry.media) {
         let Some(listed) = &other.numbering.numbers else { continue };
-        let mut shared: Vec<u16> =
-            numbers.value.iter().copied().filter(|number| listed.value.contains(number)).collect();
+        let mut shared: Vec<u16> = listed
+            .value
+            .iter()
+            .copied()
+            .filter(|number| sorted.binary_search(number).is_ok())
+            .collect();
         if shared.is_empty() {
             continue;
         }
@@ -234,7 +251,7 @@ fn check_entry(part: Part, group: &Group<'_>, entry: &LegendEntry, problems: &mu
                 "`{}` and `{}` give the same numbers to the {}: {}",
                 other.key,
                 entry.key,
-                group.describe(part),
+                group.describe(part, None),
                 describe_runs(
                     shared.chunk_by(|a, b| b - a == 1).map(|run| (run[0], run[run.len() - 1]))
                 )
@@ -250,22 +267,21 @@ fn check_entry(part: Part, group: &Group<'_>, entry: &LegendEntry, problems: &mu
 }
 
 /// Numbers the elements of one part on `face`, and reports a face showing only some of the
-/// part's entries. Returns the elements of each entry the face shows, in numbering order,
-/// with the entry's group.
+/// part's entries. Returns the entries the face shows.
 fn number_part<'l>(
     face: &mut Face,
-    numbering: &Numbering<'l>,
+    numbered: &NumberedPart<'l>,
     problems: &mut Vec<Problem>,
-) -> Vec<(usize, &'l LegendEntry, Vec<usize>)> {
-    let mut shown: Vec<(usize, &LegendEntry, Vec<usize>)> = Vec::new();
+) -> Vec<Shown<'l>> {
+    let mut shown: Vec<Shown<'l>> = Vec::new();
     let mut missing: Vec<char> = Vec::new();
-    for (at, group) in numbering.groups.iter().enumerate() {
-        for &entry in &group.entries {
-            let order = ordered(face, entry, problems);
-            if order.is_empty() {
+    for (group, entries) in numbered.groups.iter().enumerate() {
+        for &entry in &entries.entries {
+            let elements = ordered(face, entry, problems);
+            if elements.is_empty() {
                 missing.push(entry.key);
             } else {
-                shown.push((at, entry, order));
+                shown.push(Shown { group, entry, elements });
             }
         }
     }
@@ -273,7 +289,7 @@ fn number_part<'l>(
         return shown;
     }
     if !missing.is_empty() {
-        let (name, _) = names(numbering.part);
+        let (name, _) = names(numbered.part);
         let keys: Vec<String> = missing.iter().map(|key| format!("`{key}`")).collect();
         problems.push(
             Problem::new(
@@ -283,8 +299,8 @@ fn number_part<'l>(
             .with_help(format!("a face shows every legend key of its {name}s, or none of them")),
         );
     }
-    for (group, entry, order) in &shown {
-        give_numbers(face, &numbering.groups[*group], entry, order, problems);
+    for shown in &shown {
+        give_numbers(face, &numbered.groups[shown.group], shown, problems);
     }
     shown
 }
@@ -293,29 +309,28 @@ fn number_part<'l>(
 /// keeps the part's number table on the face, one segment per group.
 fn check_numbers(
     face: &mut Face,
-    numbering: &Numbering<'_>,
-    shown: &[(usize, &LegendEntry, Vec<usize>)],
+    numbered: &NumberedPart<'_>,
+    shown: &[Shown<'_>],
     components: &Components,
     problems: &mut Vec<Problem>,
 ) {
     // Each group's numbers, sorted, with the entry and element that have them. The earlier
     // checks leave them distinct, but for the two elements of a combo.
-    let mut numbered: Vec<Vec<(u16, &LegendEntry, usize)>> =
-        vec![Vec::new(); numbering.groups.len()];
-    for (group, entry, order) in shown {
-        let numbers =
-            order.iter().filter_map(|&index| Some((face.elements()[index].number?, index)));
-        numbered[*group].extend(numbers.map(|(number, index)| (number, *entry, index)));
+    let mut sorted: Vec<Vec<(u16, &LegendEntry, usize)>> = vec![Vec::new(); numbered.groups.len()];
+    for shown in shown {
+        let elements = shown.elements.iter();
+        let numbers = elements.filter_map(|&index| Some((face.elements()[index].number?, index)));
+        sorted[shown.group].extend(numbers.map(|(number, index)| (number, shown.entry, index)));
     }
-    for numbers in &mut numbered {
+    for numbers in &mut sorted {
         numbers.sort_unstable_by_key(|&(number, ..)| number);
     }
     let slots =
         |numbers: &[(u16, &LegendEntry, usize)]| numbers.chunk_by(|a, b| a.0 == b.0).count();
-    let total: usize = numbered.iter().map(|numbers| slots(numbers)).sum();
-    let declared = declared(components, numbering.part);
+    let total: usize = sorted.iter().map(|numbers| slots(numbers)).sum();
+    let declared = declared(components, numbered.part);
     if total != usize::from(declared) {
-        let (name, node) = names(numbering.part);
+        let (name, node) = names(numbered.part);
         let count = if declared == 0 { "none".to_owned() } else { declared.to_string() };
         let mut problem = Problem::new(
             format!(
@@ -332,16 +347,16 @@ fn check_numbers(
         return;
     }
     let mut complete = true;
-    for (group, numbers) in numbering.groups.iter().zip(&numbered) {
-        complete &= !report_gaps(face, numbering.part, group, numbers, problems);
+    for (group, numbers) in numbered.groups.iter().zip(&sorted) {
+        complete &= !report_gaps(face, numbered.part, group, numbers, problems);
     }
     if !complete {
         return;
     }
 
     // Without gaps, each group's numbers run from its lowest one, one slot per number.
-    let mut table = Numbers { part: numbering.part, segments: Vec::new(), slots: Vec::new() };
-    for (group, numbers) in numbering.groups.iter().zip(&numbered) {
+    let mut table = Numbers { part: numbered.part, segments: Vec::new(), slots: Vec::new() };
+    for (group, numbers) in numbered.groups.iter().zip(&sorted) {
         let Some(&(base, ..)) = numbers.first() else { continue };
         let (offset, size) = (table.slots.len(), slots(numbers));
         table.segments.push(Segment { group: group.name.map(str::to_owned), base, offset, size });
@@ -360,27 +375,27 @@ fn check_numbers(
     face.add_numbers(table);
 }
 
-/// Gives the elements of `entry` on `face` their numbers: those its `numbers=` lists, or
+/// Gives the elements of an entry on `face` their numbers: those its `numbers=` lists, or
 /// else the numbers its group leaves, counting up from its `first`. Reports numbers that do
 /// not fit the elements.
 fn give_numbers(
     face: &mut Face,
     group: &Group<'_>,
-    entry: &LegendEntry,
-    order: &[usize],
+    shown: &Shown<'_>,
     problems: &mut Vec<Problem>,
 ) {
+    let Shown { entry, elements, .. } = shown;
     if let Some(numbers) = &entry.numbering.numbers {
-        for (&index, &number) in order.iter().zip(&numbers.value) {
+        for (&index, &number) in elements.iter().zip(&numbers.value) {
             face.set_number(index, number);
         }
-        if numbers.value.len() != order.len() {
+        if numbers.value.len() != elements.len() {
             problems.push(Problem::new(
                 format!(
                     "`numbers` lists {}, but the {} face has {}",
                     plural(numbers.value.len(), "number"),
                     face.kind.name(),
-                    plural(order.len(), &format!("`{}` element", entry.key)),
+                    plural(elements.len(), &format!("`{}` element", entry.key)),
                 ),
                 numbers.span,
             ));
@@ -389,12 +404,12 @@ fn give_numbers(
     }
     let left = (entry.numbering.first..=u16::MAX)
         .filter(|number| group.listed.binary_search(number).is_err());
-    let mut numbered = 0;
-    for (&index, number) in order.iter().zip(left) {
+    let mut given = 0;
+    for (&index, number) in elements.iter().zip(left) {
         face.set_number(index, number);
-        numbered += 1;
+        given += 1;
     }
-    if numbered < order.len() {
+    if given < elements.len() {
         problems.push(Problem::new(
             format!("`{}` runs out of numbers after {}", entry.key, u16::MAX),
             entry.span,
@@ -427,7 +442,7 @@ fn report_gaps(
     let mut problem = Problem::new(
         format!(
             "the numbers of the {} on the {} face skip {}",
-            group.describe(part),
+            group.describe(part, None),
             face.kind.name(),
             describe_runs(skipped)
         ),
@@ -572,10 +587,11 @@ fn plural(count: usize, noun: &str) -> String {
 #[cfg(test)]
 mod tests {
     use indoc::{formatdoc, indoc};
+    use miette::Diagnostic;
 
     use super::*;
     use crate::catalog::Model;
-    use crate::testing::pointed;
+    use crate::testing::{covered, pointed};
 
     /// The text of a 1U server with the part counts `counts`, such as `bays 2`, whose normal
     /// face is `rows`, described by `legend` and a `c` identify LED.
@@ -597,11 +613,12 @@ mod tests {
         face.elements().iter().filter_map(|element| Some((element.key, element.number?))).collect()
     }
 
-    /// The problems of a server model, with the text each points at.
-    fn reported(rows: [&str; 2], counts: &str, legend: &str) -> Vec<(String, String)> {
+    /// Asserts the problems of a server model, each as its message and the text it points at.
+    #[track_caller]
+    fn assert_reported(rows: [&str; 2], counts: &str, legend: &str, expected: &[(&str, &str)]) {
         let text = server(rows, counts, legend);
         let problems = Model::parse("x/y", &text).expect_err("problems");
-        pointed(&text, &problems).into_iter().map(|(a, b)| (a.to_owned(), b.to_owned())).collect()
+        assert_eq!(pointed(&text, &problems), expected);
     }
 
     /// Returns the row and column of each `b` element, in numbering order.
@@ -657,21 +674,23 @@ mod tests {
 
     #[test]
     fn reports_a_layout_that_does_not_match_the_picture() {
-        let text = server(["b bc", "b b"], "bays 4", r#"b bay layout="xx""#);
-        assert_eq!(
-            pointed(&text, &Model::parse("x/y", &text).expect_err("wrong rows")),
-            [(
+        assert_reported(
+            ["b bc", "b b"],
+            "bays 4",
+            r#"b bay layout="xx""#,
+            &[(
                 "`layout` has 1 row, but the normal face has `b` elements on 2 rows",
-                r#"layout="xx""#
-            )]
+                r#"layout="xx""#,
+            )],
         );
-        let text = server(["b bc", "b b"], "bays 4", r#"b bay layout="xx,x""#);
-        assert_eq!(
-            pointed(&text, &Model::parse("x/y", &text).expect_err("wrong elements")),
-            [(
+        assert_reported(
+            ["b bc", "b b"],
+            "bays 4",
+            r#"b bay layout="xx,x""#,
+            &[(
                 "row 2 of `layout` has 1 `x`, but the normal face has 2 `b` elements there",
-                r#"layout="xx,x""#
-            )]
+                r#"layout="xx,x""#,
+            )],
         );
     }
 
@@ -689,23 +708,30 @@ mod tests {
             numbered(["xoo xoc", "o o"], "outlets 7", r#"x outlet numbers="1,4"; o outlet"#),
             [('x', 1), ('o', 2), ('o', 3), ('x', 4), ('o', 5), ('o', 6), ('o', 7)]
         );
+        // The numbers left can start below the listed ones.
+        assert_eq!(
+            numbered(["xooc", "~"], "outlets 3", r#"x outlet numbers="1"; o outlet first=0"#),
+            [('x', 1), ('o', 0), ('o', 2)]
+        );
     }
 
     #[test]
-    fn numbers_combo_ports_and_groups() {
-        // `g` and `s` are the combo ports 5 and 6; the `x` ports are XG1 and XG2. That makes
-        // 6 ports in the default group and 2 in `XG`.
+    fn numbers_and_looks_up_combo_ports_and_groups() {
+        // `g` and `s` are the combo ports 5 and 6, and port 7 is an SFP cage alone. The `x`
+        // ports are XG1 and XG2, so the switch has 7 + 2 ports.
+        let rows = ["nn g s sxc", "nn g s x"];
         let legend = r#"n port
             g port numbers="5-6" order="down"
-            s port media="sfp" numbers="5-6" order="down"
+            s port media="sfp" numbers="5-7" order="down"
             x port group="XG""#;
         assert_eq!(
-            numbered(["nn g s xc", "nn g s x"], "ports 8", legend),
+            numbered(rows, "ports 9", legend),
             [
                 ('n', 1),
                 ('n', 2),
                 ('g', 5),
                 ('s', 5),
+                ('s', 7),
                 ('x', 1),
                 ('n', 3),
                 ('n', 4),
@@ -713,6 +739,37 @@ mod tests {
                 ('s', 6),
                 ('x', 2)
             ]
+        );
+
+        let text = server(rows, "ports 9", legend);
+        let face = Model::parse("x/y", &text).expect("valid model").faces.normal.expect("face");
+        let numbers = face.numbers(Part::Port).expect("port numbers");
+        // The key and row of each element with a number.
+        let at = |index: Option<usize>| {
+            index.map(|at| (face.elements()[at].key, face.elements()[at].row))
+        };
+        let get =
+            |group, number| numbers.get(group, number).map(|slot| (at(slot.element), at(slot.sfp)));
+        assert_eq!(get(None, 1), Some((Some(('n', 0)), None)));
+        assert_eq!(get(None, 6), Some((Some(('g', 1)), Some(('s', 1)))));
+        assert_eq!(get(None, 7), Some((None, Some(('s', 0)))));
+        assert_eq!(get(Some("XG"), 2), Some((Some(('x', 1)), None)));
+        assert_eq!(get(None, 8), None);
+        assert_eq!(get(Some("XG"), 0), None);
+        assert_eq!(get(Some("YY"), 1), None);
+        assert!(face.numbers(Part::Bay).is_none());
+
+        // A combo counts once, and the groups count together.
+        let picture = indoc! {r##"
+            #"""
+            nn g s sxc
+            nn g s x
+            """#"##};
+        assert_reported(
+            rows,
+            "ports 11",
+            legend,
+            &[("the normal face shows 9 ports, but the model declares 11", picture)],
         );
     }
 
@@ -725,37 +782,40 @@ mod tests {
     #[test]
     fn reports_two_entries_taking_the_numbers_left_once() {
         // The count is not checked either, as the numbers overlap.
-        let problems = reported(["xoo xoc", "o o"], "", "x outlet; o outlet");
-        assert_eq!(
-            problems,
-            [(
-                "`x` and `o` both number the outlets from `first`".to_owned(),
-                "o outlet".to_owned()
-            )]
+        assert_reported(
+            ["xoo xoc", "o o"],
+            "",
+            "x outlet; o outlet",
+            &[("`x` and `o` both number the outlets from `first`", "o outlet")],
         );
     }
 
     #[test]
-    fn reports_numbers_that_do_not_fit_the_face() {
-        let owned = |message: &str, at: &str| (message.to_owned(), at.to_owned());
-        assert_eq!(
-            reported(["x xoc", "o o"], "outlets 5", r#"x outlet numbers="1,2,3"; o outlet"#),
-            [owned(
+    fn reports_a_number_listed_twice_on_the_same_media() {
+        assert_reported(
+            ["g hc", "n"],
+            "ports 2",
+            r#"g port numbers="1"; h port numbers="1"; n port"#,
+            &[("`g` and `h` give the same numbers to the ports: 1", r#"numbers="1""#)],
+        );
+    }
+
+    #[test]
+    fn reports_numbers_that_do_not_fit_the_elements() {
+        assert_reported(
+            ["x xoc", "o o"],
+            "outlets 5",
+            r#"x outlet numbers="1,2,3"; o outlet"#,
+            &[(
                 "`numbers` lists 3 numbers, but the normal face has 2 `x` elements",
-                r#"numbers="1,2,3""#
-            )]
+                r#"numbers="1,2,3""#,
+            )],
         );
-        assert_eq!(
-            reported(["x xoc", "o o"], "outlets 5", r#"x outlet numbers="1,9"; o outlet"#),
-            [owned("the numbers of the outlets on the normal face skip 5-8", r#"numbers="1,9""#)]
-        );
-        assert_eq!(
-            reported(["g hc", "n"], "ports 2", r#"g port numbers="1"; h port numbers="1"; n port"#),
-            [owned("`g` and `h` give the same numbers to the ports: 1", r#"numbers="1""#)]
-        );
-        assert_eq!(
-            reported(["b bc", "~"], "bays 2", "b bay first=65535; ~ fill"),
-            [owned("`b` runs out of numbers after 65535", "b bay first=65535")]
+        assert_reported(
+            ["b bc", "~"],
+            "bays 2",
+            "b bay first=65535; ~ fill",
+            &[("`b` runs out of numbers after 65535", "b bay first=65535")],
         );
     }
 
@@ -766,10 +826,11 @@ mod tests {
             b bc
             b b
             """#"##};
-        let owned = |message: &str| (message.to_owned(), picture.to_owned());
-        assert_eq!(
-            reported(["b bc", "b b"], "bays 3", "b bay"),
-            [owned("the normal face shows 4 bays, but the model declares 3")]
+        assert_reported(
+            ["b bc", "b b"],
+            "bays 3",
+            "b bay",
+            &[("the normal face shows 4 bays, but the model declares 3", picture)],
         );
         let text = server(["b bc", "b b"], "", "b bay");
         let problems = Model::parse("x/y", &text).expect_err("no count");
@@ -819,56 +880,36 @@ mod tests {
     }
 
     #[test]
-    fn looks_up_the_elements_of_a_number() {
-        let legend = r#"n port
-            g port numbers="5-6" order="down"
-            s port media="sfp" numbers="5-6" order="down"
-            x port group="XG""#;
-        let text = server(["nn g s xc", "nn g s x"], "ports 8", legend);
-        let face = Model::parse("x/y", &text).expect("valid model").faces.normal.expect("face");
-        let numbers = face.numbers(Part::Port).expect("port numbers");
-        // The key and row of each element with a number.
-        let at = |index: Option<usize>| {
-            index.map(|at| (face.elements()[at].key, face.elements()[at].row))
-        };
-        let get =
-            |group, number| numbers.get(group, number).map(|slot| (at(slot.element), at(slot.sfp)));
-        assert_eq!(get(None, 1), Some((Some(('n', 0)), None)));
-        assert_eq!(get(None, 6), Some((Some(('g', 1)), Some(('s', 1)))));
-        assert_eq!(get(Some("XG"), 2), Some((Some(('x', 1)), None)));
-        assert_eq!(get(None, 7), None);
-        assert_eq!(get(Some("XG"), 0), None);
-        assert_eq!(get(Some("YY"), 1), None);
-        assert!(face.numbers(Part::Bay).is_none());
-    }
-
-    #[test]
     fn reports_a_value_that_cannot_be_read_once() {
-        let messages = |rows, counts, legend| -> Vec<String> {
-            reported(rows, counts, legend).into_iter().map(|(message, _)| message).collect()
-        };
         // Without its `numbers=`, `x` would also take the numbers left, as `o` does.
-        assert_eq!(
-            messages(["xxooc", "~"], "outlets 4", r#"x outlet numbers="1,x"; o outlet; ~ fill"#),
-            ["`numbers` must be numbers and ranges such as `1,9,17` or `25-28`, found `1,x`"]
+        assert_reported(
+            ["xxooc", "~"],
+            "outlets 4",
+            r#"x outlet numbers="1,x"; o outlet; ~ fill"#,
+            &[(
+                "`numbers` must be numbers and ranges such as `1,9,17` or `25-28`, found `1,x`",
+                r#"numbers="1,x""#,
+            )],
         );
         // Read as RJ45, `s` would repeat the number of `g`.
-        assert_eq!(
-            messages(
-                ["g sc", "~"],
-                "ports 1",
-                r#"g port numbers="1"; s port media="fibre" numbers="1"; ~ fill"#
-            ),
-            ["`media` must be one of `rj45`, `sfp`, found `fibre`"]
+        assert_reported(
+            ["g sc", "~"],
+            "ports 1",
+            r#"g port numbers="1"; s port media="fibre" numbers="1"; ~ fill"#,
+            &[("`media` must be one of `rj45`, `sfp`, found `fibre`", r#"media="fibre""#)],
         );
-        assert_eq!(
-            messages(["bbc", "~"], "bays \"2\"", "b bay; ~ fill"),
-            ["`number of bays` must be a whole number, found the string \"2\""]
+        assert_reported(
+            ["bbc", "~"],
+            "bays \"2\"",
+            "b bay; ~ fill",
+            &[("`number of bays` must be a whole number, found the string \"2\"", "\"2\"")],
         );
         // The `o` cells are drawn as they are, so the face shows one outlet of three.
-        assert_eq!(
-            messages(["xooc", "~"], "outlets 3", r#"x outlet numbers="1"; o outlets; ~ fill"#),
-            ["unknown legend type `outlets`"]
+        assert_reported(
+            ["xooc", "~"],
+            "outlets 3",
+            r#"x outlet numbers="1"; o outlets; ~ fill"#,
+            &[("unknown legend type `outlets`", "outlets")],
         );
     }
 
@@ -900,17 +941,51 @@ mod tests {
     }
 
     #[test]
-    fn blames_a_gap_on_what_gives_the_number_after_it() {
+    fn reports_gaps_at_what_gives_the_number_after_them() {
+        // 9 comes from `x`'s list, after the 2-4 that `o` takes.
+        assert_reported(
+            ["x xoc", "o o"],
+            "outlets 5",
+            r#"x outlet numbers="1,9"; o outlet"#,
+            &[("the numbers of the outlets on the normal face skip 5-8", r#"numbers="1,9""#)],
+        );
+        // 5 comes from `o`, which counts up from `first=5`.
+        assert_reported(
+            ["xxooc", "~"],
+            "outlets 4",
+            r#"x outlet numbers="1,2"; o outlet first=5; ~ fill"#,
+            &[("the numbers of the outlets on the normal face skip 3-4", "first=5")],
+        );
+        assert_reported(
+            ["g hc", "~"],
+            "ports 2",
+            r#"g port numbers="1" group="XG"; h port numbers="3" group="XG"; ~ fill"#,
+            &[(
+                "the numbers of the ports in group `XG` on the normal face skip 2",
+                r#"numbers="3""#,
+            )],
+        );
+        // Two gaps with two causes: the list gives 4, and `first=7` gives 7.
+        let text =
+            server(["xxooc", "~"], "outlets 4", r#"x outlet numbers="1,4"; o outlet first=7"#);
+        let problems = Model::parse("x/y", &text).expect_err("gaps");
         assert_eq!(
-            reported(
-                ["xxooc", "~"],
-                "outlets 4",
-                r#"x outlet numbers="1,2"; o outlet first=5; ~ fill"#
-            ),
-            [(
-                "the numbers of the outlets on the normal face skip 3-4".to_owned(),
-                "first=5".to_owned()
-            )]
+            pointed(&text, &problems),
+            [("the numbers of the outlets on the normal face skip 2-3, 5-6", r#"numbers="1,4""#)]
+        );
+        let labels: Vec<_> = problems[0]
+            .labels()
+            .expect("labels")
+            .map(|label| {
+                (label.label().unwrap_or_default().to_owned(), covered(&text, *label.inner()))
+            })
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                ("here".to_owned(), r#"numbers="1,4""#),
+                ("this leaves a gap too".to_owned(), "first=7")
+            ]
         );
     }
 }
