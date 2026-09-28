@@ -361,32 +361,16 @@ mod tests {
     }
 
     #[test]
-    fn reads_a_side_mounted_strip() {
-        let text = r#"model { name "APC AP7952"; kind "pdu"; mount "side"; outlets 24 }"#;
-        let model = Model::parse("apc/ap7952", text).expect("valid model");
-        assert_eq!(model.mount, Mount::Side);
+    fn reads_mount_depth_and_ears() {
+        let text = r#"model {
+            name "X"; kind "pdu"; mount "side"; depth "half"; ears "screws"; outlets 24
+        }"#;
+        let model = Model::parse("x/y", text).expect("valid model");
+        assert_eq!(
+            (model.mount, model.depth, model.ears),
+            (Mount::Side, Depth::Half, Ears::Screws)
+        );
         assert_eq!(model.components.outlets, 24);
-    }
-
-    #[test]
-    fn reads_a_half_depth_model() {
-        let text = r#"model { name "Patch panel"; kind "patch-panel"; depth "half" }"#;
-        let model = Model::parse("generic/patchpanel-24", text).expect("valid model");
-        assert_eq!(model.depth, Depth::Half);
-    }
-
-    #[test]
-    fn reports_an_invalid_depth_with_a_suggestion() {
-        let problems = Model::parse("x/y", r#"model { name "X"; kind "switch"; depth "hlaf" }"#)
-            .expect_err("invalid depth");
-        assert_eq!(problems[0].message(), "`depth` must be one of `full`, `half`, found `hlaf`");
-        assert_eq!(problems[0].help(), Some("did you mean `half`?"));
-    }
-
-    #[test]
-    fn reads_screw_ears() {
-        let text = r#"model { name "Blank panel"; kind "blank"; ears "screws" }"#;
-        assert_eq!(Model::parse("generic/blank-1u", text).expect("valid model").ears, Ears::Screws);
     }
 
     #[test]
@@ -398,12 +382,22 @@ mod tests {
     }
 
     #[test]
-    fn reports_an_unknown_kind_with_a_suggestion() {
+    fn suggests_close_names_for_typos() {
         let problems =
-            Model::parse("x/y", r#"model { name "X"; kind "swich" }"#).expect_err("invalid kind");
-        assert_eq!(problems.len(), 1);
+            Model::parse("x/y", r#"model { name "X"; kind "swich"; depth "hlaf"; heigth 2 }"#)
+                .expect_err("typos");
+        let helps: Vec<_> = problems.iter().map(Problem::help).collect();
+        assert_eq!(
+            helps,
+            [
+                Some("did you mean `switch`?"),
+                Some("did you mean `half`?"),
+                Some("did you mean `height`?"),
+            ]
+        );
         assert!(problems[0].message().starts_with("`kind` must be one of `server`, "));
-        assert_eq!(problems[0].help(), Some("did you mean `switch`?"));
+        assert_eq!(problems[1].message(), "`depth` must be one of `full`, `half`, found `hlaf`");
+        assert_eq!(problems[2].message(), "unknown node `heigth` in a model");
     }
 
     #[test]
@@ -419,14 +413,6 @@ mod tests {
     }
 
     #[test]
-    fn reports_an_unknown_node_with_a_suggestion() {
-        let problems = Model::parse("x/y", r#"model { name "X"; kind "server"; heigth 2 }"#)
-            .expect_err("typo");
-        assert_eq!(problems[0].message(), "unknown node `heigth` in a model");
-        assert_eq!(problems[0].help(), Some("did you mean `height`?"));
-    }
-
-    #[test]
     fn reports_repeated_nodes_and_invalid_values() {
         assert_eq!(
             messages(
@@ -439,13 +425,6 @@ mod tests {
                 "unexpected argument on `psus`",
             ]
         );
-    }
-
-    #[test]
-    fn allows_a_normal_and_a_compact_face() {
-        let text = r#"model { name "X"; kind "server"; face "a\nb"; face "c" compact=#true }"#;
-        let faces = Model::parse("x/y", text).expect("valid model").faces;
-        assert!(faces.normal.is_some() && faces.compact.is_some());
     }
 
     #[test]

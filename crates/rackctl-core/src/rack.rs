@@ -655,6 +655,7 @@ mod tests {
                 device "er6p" model="ubiquiti/er6p" u=36
                 device "r730" model="dell/r730-sff8" u=28 face="front"
                 device "pdu-side" model="apc/ap7952" mount="right" face="rear"
+                device "pdu-left" model="apc/ap7952" mount="left" u=19
             }
         "#;
         let rack = Rack::parse(text).expect("valid rack");
@@ -676,15 +677,14 @@ mod tests {
                     Placement::Strip { side: Side::Right, u: 1 },
                     Face::Rear
                 ),
+                (
+                    "pdu-left",
+                    "apc/ap7952",
+                    Placement::Strip { side: Side::Left, u: 19 },
+                    Face::Front
+                ),
             ]
         );
-    }
-
-    #[test]
-    fn places_a_strip_from_a_given_unit() {
-        let text = r#"rack "r" units=36 { device "pdu" model="apc/ap7952" mount="left" u=19 }"#;
-        let rack = Rack::parse(text).expect("valid rack");
-        assert_eq!(rack.devices[0].placement, Placement::Strip { side: Side::Left, u: 19 });
     }
 
     #[test]
@@ -732,24 +732,19 @@ mod tests {
     fn reports_invalid_and_repeated_ids() {
         assert_eq!(
             messages(
-                r#"rack "r" units=36 {
+                r#"rack "-r" units=36 {
                     device "Srv01" model="x/a" u=1
-                    device "srv02" model="x/a" u=2
+                    device "srv-" model="x/a" u=2
                     device "srv02" model="x/a" u=3
+                    device "srv02" model="x/a" u=4
                 }"#
             ),
             [
+                format!("rack names {IDENTIFIER_RULE}"),
+                format!("device ids {IDENTIFIER_RULE}"),
                 format!("device ids {IDENTIFIER_RULE}"),
                 "the device id `srv02` is used more than once".to_owned(),
             ]
-        );
-    }
-
-    #[test]
-    fn reports_ids_and_rack_names_that_break_the_rule() {
-        assert_eq!(
-            messages(r#"rack "-r" units=36 { device "srv-" model="x/a" u=1 }"#),
-            [format!("rack names {IDENTIFIER_RULE}"), format!("device ids {IDENTIFIER_RULE}")]
         );
     }
 

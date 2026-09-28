@@ -635,21 +635,45 @@ mod tests {
 
     use super::*;
     use crate::catalog::Model;
+    use crate::testing::{covered, pointed};
 
     fn model(text: &str) -> Model {
         Model::parse("x/y", text).expect("valid model")
     }
 
+    fn problems(text: &str) -> Vec<Problem> {
+        Model::parse("x/y", text).expect_err("the model has problems")
+    }
+
     fn messages(text: &str) -> Vec<String> {
-        Model::parse("x/y", text)
-            .expect_err("the model has problems")
+        problems(text).iter().map(|problem| problem.message().to_owned()).collect()
+    }
+
+    /// The model text of a 1U server whose normal face is `rows`, described by `legend`.
+    fn server(rows: [&str; 2], legend: &str) -> String {
+        let [top, bottom] = rows;
+        format!(
+            "model {{ name \"X\"; kind \"server\"\nface #\"\"\"\n{top}\n{bottom}\n\"\"\"#\n\
+             legend {{ {legend} }} }}"
+        )
+    }
+
+    fn normal_face(text: &str) -> Face {
+        model(text).faces.normal.expect("normal face")
+    }
+
+    /// Returns each element as its key, rectangle (row, column, width, height) and the text
+    /// its top row covers in the model file.
+    fn elements(text: &str) -> Vec<(char, [usize; 4], &str)> {
+        normal_face(text)
+            .elements()
             .iter()
-            .map(|problem| problem.message().to_owned())
+            .map(|e| (e.key, [e.row, e.column, e.width, e.height], covered(text, e.span)))
             .collect()
     }
 
     #[test]
-    fn reads_each_kind_of_face() {
+    fn reads_faces_and_locates_their_characters() {
         let text = r##"model {
             name "X"; kind "server"; height 1
             face #"""
@@ -662,47 +686,103 @@ mod tests {
         let faces = model(text).faces;
         let normal = faces.normal.expect("normal face");
         assert_eq!(normal.rows().collect::<Vec<_>>(), ["p nnnn", "bbbbbb"]);
-        assert_eq!(faces.compact.expect("compact face").kind, FaceKind::Compact);
+        assert_eq!(covered(text, normal.span_at(1, 2, 3)), "bbb");
+        let compact = faces.compact.expect("compact face");
+        assert_eq!(compact.kind, FaceKind::Compact);
+        assert_eq!(covered(text, compact.span_at(0, 2, 4)), "nnnn");
         assert!(faces.strip.is_none());
     }
 
     #[test]
-    fn locates_picture_characters_in_the_file() {
+    fn reads_a_strip_on_a_side_mounted_model() {
         let text = r##"model {
-            name "X"; kind "server"; height 1
-            face #"""
-              p nnnn
-              bbbbbb
+            name "Strip"; kind "pdu"; mount "side"
+            face strip=#true #"""
+              p
+              ~
+              o
               """#
-            face compact=#true "p nnnn bbbbbb"
-            legend { p power; n name; b bay }
+            legend { p power; o outlet; ~ fill }
         }"##;
-        let faces = model(text).faces;
-        let normal = faces.normal.expect("normal face");
-        let span = normal.span_at(1, 2, 3);
-        assert_eq!(&text[span.offset()..span.offset() + span.len()], "bbb");
-        let compact = faces.compact.expect("compact face");
-        let span = compact.span_at(0, 2, 4);
-        assert_eq!(&text[span.offset()..span.offset() + span.len()], "nnnn");
+        assert!(model(text).faces.strip.is_some());
     }
 
     #[test]
-    fn falls_back_to_the_whole_picture_for_rows_written_with_escapes() {
+    fn reports_a_picture_that_is_not_a_string() {
+        assert_eq!(
+            messages(r#"model { name "X"; kind "server"; face 5 compact="yes" }"#),
+            [
+                "`picture` must be a string, found the number 5",
+                "`compact` must be #true or #false, found the string \"yes\"",
+            ]
+        );
+    }
+
+    #[test]
+    fn reports_faces_that_do_not_fit_the_model() {
+        assert_eq!(
+            messages(
+                r#"model {
+                    name "X"; kind "server"; height 1
+                    face "p"
+                    face "b"
+                    face compact=#true strip=#true "x"
+                    face strip=#true "p"
+                    face compact=#true "p"
+                    legend { p power; b bay }
+                }"#
+            ),
+            [
+                "the model has more than one normal face",
+                "a face is either compact or a strip, not both",
+                "the normal face has 1 row; a 1U model needs 2 rows",
+                "a strip face needs a side-mounted model",
+            ]
+        );
+    }
+
+    #[test]
+    fn reports_faces_that_do_not_fit_a_side_mounted_model() {
+        let text = r#"model {
+            name "Strip"; kind "pdu"; mount "side"
+            face "p"
+            face compact=#true "p"
+            face strip=#true "pppppp"
+            legend { p power }
+        }"#;
+        let problems = problems(text);
+        assert_eq!(
+            pointed(text, &problems),
+            [
+                ("a side-mounted model has only a strip face, not a normal one", r#""p""#),
+                ("a side-mounted model has only a strip face, not a compact one", r#""p""#),
+                ("a strip face is at most 5 columns wide; this row has 6", "pppppp"),
+            ]
+        );
+        assert_eq!(problems[1].help(), Some("replace `compact=#true` with `strip=#true`"));
+    }
+
+    #[test]
+    fn reports_an_invalid_height_once() {
+        // Four rows would be too many for 1U, but no face is checked against an invalid height.
+        let model = |height| {
+            format!(
+                r#"model {{ name "X"; kind "server"; height {height}; face "p\nb\nb\nb"; legend {{ p power; b bay }} }}"#
+            )
+        };
+        assert_eq!(messages(&model("0")), ["`height` must be at least 1"]);
+        assert_eq!(messages(&model("\"2\"")).len(), 1);
+    }
+
+    #[test]
+    fn points_at_the_whole_picture_for_rows_not_located() {
         // The first row is written with an escape, so neither row is located.
         let text =
             r#"model { name "X"; kind "server"; face "p\u{62}\nbb"; legend { p power; b bay } }"#;
-        let normal = model(text).faces.normal.expect("normal face");
+        let normal = normal_face(text);
         assert_eq!(normal.rows().collect::<Vec<_>>(), ["pb", "bb"]);
         assert_eq!(normal.span_at(0, 0, 1), normal.span);
         assert_eq!(normal.span_at(1, 0, 2), normal.span);
-        // A picture written on one line has only its first row located, so a row of `n`
-        // cannot be found inside the `\n` escape before it.
-        let text =
-            r#"model { name "X"; kind "server"; face "p\nnnnn"; legend { p power; n name } }"#;
-        let normal = model(text).faces.normal.expect("normal face");
-        let span = normal.span_at(0, 0, 1);
-        assert_eq!(&text[span.offset()..span.offset() + span.len()], "p");
-        assert_eq!(normal.span_at(1, 0, 4), normal.span);
     }
 
     /// Where `locate_rows` finds the rows of the picture in `text`, a single `face` node.
@@ -741,33 +821,130 @@ mod tests {
         assert_eq!(located(text), [None, None]);
     }
 
-    /// The text of the model file each problem points at, with its message.
-    fn pointed(text: &str) -> Vec<(String, String)> {
-        Model::parse("x/y", text)
-            .expect_err("the model has problems")
-            .iter()
-            .map(|p| {
-                let span = p.span();
-                (p.message().to_owned(), text[span.offset()..span.offset() + span.len()].to_owned())
-            })
-            .collect()
+    #[test]
+    fn cuts_the_picture_into_elements_and_literals() {
+        let text = server(["p N bbx", "~~ tttt"], "p power; b bay; t short; ~ fill");
+        let face = normal_face(&text);
+        assert_eq!(face.cell(0, 2), Some(Cell::Literal('N')));
+        assert_eq!(face.cell(0, 6), Some(Cell::Literal('x')));
+        assert_eq!(face.cell(1, 2), Some(Cell::Literal(' ')));
+        assert_eq!(face.cell(1, 7), None);
+        assert_eq!(
+            elements(&text),
+            [
+                ('p', [0, 0, 1, 1], "p"),
+                ('b', [0, 4, 1, 1], "b"),
+                ('b', [0, 5, 1, 1], "b"),
+                ('~', [1, 0, 1, 1], "~"),
+                ('~', [1, 1, 1, 1], "~"),
+                ('t', [1, 3, 4, 1], "tttt"),
+            ]
+        );
+        assert_eq!(face.cell(1, 5), Some(Cell::Element(5)));
     }
 
     #[test]
-    fn reports_a_run_of_stray_underscores_and_bars_once() {
-        // `x__` has one stray run, the `|` under the `x` is stray, and so is the `||` under
-        // the text field, which `|` cannot extend.
-        let text = server(["x__ tt", "|   ||"], "t short");
+    fn extends_elements_with_underscores_and_bars() {
+        let text = server(["b__ c_ tt_", "||| ||"], "b bay; c psu; t short");
+        assert_eq!(
+            elements(&text),
+            [('b', [0, 0, 3, 2], "b__"), ('c', [0, 4, 2, 2], "c_"), ('t', [0, 7, 3, 1], "tt_")]
+        );
+    }
+
+    #[test]
+    fn reports_underscores_and_bars_with_nothing_to_continue() {
+        // Each run is reported once. Neither continues a literal or a fill, and `|` does not
+        // continue a text field either.
+        let text = server(["_b x__ ~_ tt", "   |      ||"], "b bay; t short; ~ fill");
         assert_eq!(
             messages(&text),
             [
+                "`_` has nothing on its left to continue",
+                "`_` has nothing on its left to continue",
                 "`_` has nothing on its left to continue",
                 "`|` has nothing above it to continue",
                 "`|` has nothing above it to continue",
             ]
         );
-        let stray = pointed(&text);
-        assert_eq!(stray.iter().map(|(_, at)| at.as_str()).collect::<Vec<_>>(), ["_", "|", "|"]);
+    }
+
+    #[test]
+    fn reports_elements_that_are_not_rectangles() {
+        let text = server(["b_ c", "|  |_"], "b bay; c bay");
+        assert_eq!(
+            pointed(&text, &problems(&text)),
+            [("this element is not a rectangle", "b_"), ("this element is not a rectangle", "c")]
+        );
+    }
+
+    #[test]
+    fn reports_characters_that_are_not_one_column_wide() {
+        let text = server(["中b", "\tb"], "b bay");
+        assert_eq!(
+            pointed(&text, &problems(&text)),
+            [
+                ("`中` is 2 columns wide; every character must be one column", "中"),
+                ("control characters such as `\\t` cannot be drawn", "\t"),
+            ]
+        );
+    }
+
+    #[test]
+    fn links_number_fields_to_the_element_they_touch() {
+        let text = server(["##b c##", "~"], r##""#" number gap=1; b bay; c psu; ~ fill"##);
+        let face = normal_face(&text);
+        let linked: Vec<_> = face
+            .elements()
+            .iter()
+            .filter_map(|e| Some((e.column, face.elements()[e.number_of?].key)))
+            .collect();
+        assert_eq!(linked, [(0, 'b'), (5, 'c')]);
+    }
+
+    #[test]
+    fn reports_number_fields_without_one_element_to_number() {
+        // A lone field is reported only once, not also for having no room besides its gap.
+        let text = server(
+            ["# b##b #b ##p #t", "~"],
+            r##""#" number gap=1; b bay; p power; t short; ~ fill"##,
+        );
+        let touch = "a number field must touch a bay, port or other numbered element";
+        assert_eq!(
+            pointed(&text, &problems(&text)),
+            [
+                (touch, "#"),
+                ("this number field touches numbered elements on both sides", "##"),
+                ("this number field has no room for a number besides its `gap=1`", "#"),
+                (touch, "##"),
+                (touch, "#"),
+            ]
+        );
+    }
+
+    #[test]
+    fn accepts_glyphs_of_one_character_or_one_per_cell() {
+        let text = server(["b__ c c", "~"], r#"b bay="abc"; c psu="■"; ~ fill"#);
+        assert!(Model::parse("x/y", &text).is_ok());
+    }
+
+    #[test]
+    fn reports_glyphs_that_do_not_fit_their_elements() {
+        let text = server(["b__ b cc", "~"], r#"b bay="abc"; c psu="中"; ~ fill"#);
+        let problems = problems(&text);
+        assert_eq!(
+            pointed(&text, &problems),
+            [
+                ("this glyph has 3 characters, but a `b` element covers 1 cell", r#"bay="abc""#),
+                ("`中` is 2 columns wide; every character must be one column", r#"psu="中""#),
+            ]
+        );
+        let labels: Vec<_> = problems[0]
+            .labels()
+            .expect("labels")
+            .map(|label| covered(&text, *label.inner()))
+            .collect();
+        assert_eq!(labels, [r#"bay="abc""#, "b"]);
     }
 
     #[test]
@@ -789,314 +966,13 @@ mod tests {
     }
 
     #[test]
-    fn points_at_the_glyph_and_the_element_it_does_not_fit() {
-        let text = server(["b_ b", "~"], r#"b bay="ab"; ~ fill"#);
-        let problems = Model::parse("x/y", &text).expect_err("glyph that does not fit");
-        assert_eq!(problems.len(), 1);
-        assert_eq!(
-            problems[0].message(),
-            "this glyph has 2 characters, but a `b` element covers 1 cell"
-        );
-        let labels: Vec<_> = problems[0]
-            .labels()
-            .expect("labels")
-            .map(|label| &text[label.offset()..label.offset() + label.len()])
-            .collect();
-        assert_eq!(labels, [r#"bay="ab""#, "b"]);
-    }
-
-    #[test]
-    fn reports_an_invalid_height_once() {
-        // Four rows would be too many for 1U, but no face is checked against an invalid height.
-        let model = |height| {
-            format!(
-                r#"model {{ name "X"; kind "server"; height {height}; face "p\nb\nb\nb"; legend {{ p power; b bay }} }}"#
-            )
-        };
-        assert_eq!(messages(&model("0")), ["`height` must be at least 1"]);
-        assert_eq!(messages(&model("\"2\"")).len(), 1);
-    }
-
-    #[test]
-    fn reports_only_that_a_lone_number_field_touches_nothing() {
-        let text = server(["#", "~"], r##""#" number gap=1; ~ fill"##);
-        assert_eq!(
-            messages(&text),
-            ["a number field must touch a bay, port or other numbered element"]
-        );
-    }
-
-    #[test]
-    fn does_not_number_leds_or_text() {
-        let text = server(["##p #t", "~"], r##""#" number; p power; t short; ~ fill"##);
-        assert_eq!(
-            messages(&text),
-            [
-                "a number field must touch a bay, port or other numbered element",
-                "a number field must touch a bay, port or other numbered element",
-            ]
-        );
-    }
-
-    #[test]
-    fn points_number_field_problems_at_the_field() {
-        let text = server(["b##b", "~"], r##""#" number; b bay; ~ fill"##);
-        assert_eq!(
-            pointed(&text),
-            [(
-                "this number field touches numbered elements on both sides".to_owned(),
-                "##".to_owned()
-            )]
-        );
-    }
-
-    #[test]
-    fn suggests_replacing_compact_on_a_side_mounted_model() {
-        let text = r#"model { name "S"; kind "pdu"; mount "side"; face compact=#true "p"; legend { p power } }"#;
-        let problems = Model::parse("x/y", text).expect_err("compact face on a strip");
-        assert_eq!(problems[0].help(), Some("replace `compact=#true` with `strip=#true`"));
-    }
-
-    #[test]
     fn holds_back_unused_keys_while_the_model_has_other_problems() {
         let text = server(["p", "~"], "p power; b bay; ~ fill");
         assert_eq!(
-            pointed(&text),
-            [("legend key `b` is not used by any face".to_owned(), "b bay".to_owned())]
+            pointed(&text, &problems(&text)),
+            [("legend key `b` is not used by any face", "b bay")]
         );
         let with_other_problem = server(["_p", "~"], "p power; b bay; ~ fill");
         assert!(!messages(&with_other_problem).iter().any(|m| m.contains("not used")));
-    }
-
-    #[test]
-    fn reads_a_strip_on_a_side_mounted_model() {
-        let text = r##"model {
-            name "Strip"; kind "pdu"; mount "side"
-            face strip=#true #"""
-              p
-              ~
-              o
-              """#
-            legend { p power; o outlet; ~ fill }
-        }"##;
-        assert!(model(text).faces.strip.is_some());
-    }
-
-    #[test]
-    fn reports_faces_that_do_not_fit_the_model() {
-        assert_eq!(
-            messages(
-                r#"model {
-                    name "X"; kind "server"; height 1
-                    face "p"
-                    face "b"
-                    face compact=#true strip=#true "x"
-                    face strip=#true "p"
-                    face compact=#true "p"
-                    legend { p power; b bay }
-                }"#
-            ),
-            [
-                "the model has more than one normal face",
-                "a face is either compact or a strip, not both",
-                "the normal face has 1 row; a 1U model needs 2 rows",
-                "a strip face needs a side-mounted model",
-            ]
-        );
-    }
-
-    #[test]
-    fn reports_normal_faces_on_side_mounted_models_and_wide_strips() {
-        let text = r#"model {
-            name "Strip"; kind "pdu"; mount "side"
-            face "p"
-            face strip=#true "pppppp"
-            legend { p power }
-        }"#;
-        let problems = Model::parse("x/y", text).expect_err("problems");
-        let found: Vec<_> = problems.iter().map(Problem::message).collect();
-        assert_eq!(
-            found,
-            [
-                "a side-mounted model has only a strip face, not a normal one",
-                "a strip face is at most 5 columns wide; this row has 6",
-            ]
-        );
-        let span = problems[1].span();
-        assert_eq!(&text[span.offset()..span.offset() + span.len()], "pppppp");
-    }
-
-    #[test]
-    fn reports_a_picture_that_is_not_a_string() {
-        assert_eq!(
-            messages(r#"model { name "X"; kind "server"; face 5 compact="yes" }"#),
-            [
-                "`picture` must be a string, found the number 5",
-                "`compact` must be #true or #false, found the string \"yes\"",
-            ]
-        );
-    }
-
-    /// The model text of a 1U server whose normal face is `rows`, described by `legend`.
-    fn server(rows: [&str; 2], legend: &str) -> String {
-        let [top, bottom] = rows;
-        format!(
-            "model {{ name \"X\"; kind \"server\"\nface #\"\"\"\n{top}\n{bottom}\n\"\"\"#\n\
-             legend {{ {legend} }} }}"
-        )
-    }
-
-    fn normal_face(text: &str) -> Face {
-        model(text).faces.normal.expect("normal face")
-    }
-
-    /// Returns each element as its key, rectangle (row, column, width, height) and the text
-    /// its top row covers in the model file.
-    fn elements(text: &str) -> Vec<(char, [usize; 4], String)> {
-        normal_face(text)
-            .elements()
-            .iter()
-            .map(|e| {
-                let written = &text[e.span.offset()..e.span.offset() + e.span.len()];
-                (e.key, [e.row, e.column, e.width, e.height], written.to_owned())
-            })
-            .collect()
-    }
-
-    #[test]
-    fn cuts_the_picture_into_elements_and_literals() {
-        let text = server(["p N bbx", "~~ tttt"], "p power; b bay; t short; ~ fill");
-        let face = normal_face(&text);
-        assert_eq!(face.cell(0, 2), Some(Cell::Literal('N')));
-        assert_eq!(face.cell(0, 6), Some(Cell::Literal('x')));
-        assert_eq!(face.cell(1, 2), Some(Cell::Literal(' ')));
-        assert_eq!(face.cell(1, 7), None);
-        assert_eq!(
-            elements(&text),
-            [
-                ('p', [0, 0, 1, 1], "p".to_owned()),
-                ('b', [0, 4, 1, 1], "b".to_owned()),
-                ('b', [0, 5, 1, 1], "b".to_owned()),
-                ('~', [1, 0, 1, 1], "~".to_owned()),
-                ('~', [1, 1, 1, 1], "~".to_owned()),
-                ('t', [1, 3, 4, 1], "tttt".to_owned()),
-            ]
-        );
-        assert_eq!(face.cell(1, 5), Some(Cell::Element(5)));
-    }
-
-    #[test]
-    fn extends_elements_with_underscores_and_bars() {
-        let text = server(["b__ c_ tt_", "||| ||"], "b bay; c psu; t short");
-        assert_eq!(
-            elements(&text),
-            [
-                ('b', [0, 0, 3, 2], "b__".to_owned()),
-                ('c', [0, 4, 2, 2], "c_".to_owned()),
-                ('t', [0, 7, 3, 1], "tt_".to_owned()),
-            ]
-        );
-    }
-
-    #[test]
-    fn reports_underscores_and_bars_with_nothing_to_continue() {
-        let text = server(["_b ~_ tt", "|     |"], "b bay; t short; ~ fill");
-        assert_eq!(
-            messages(&text),
-            [
-                "`_` has nothing on its left to continue",
-                "`_` has nothing on its left to continue",
-                "`|` has nothing above it to continue",
-                "`|` has nothing above it to continue",
-            ]
-        );
-    }
-
-    #[test]
-    fn reports_elements_that_are_not_rectangles() {
-        let text = server(["b_ c", "|  |_"], "b bay; c bay");
-        let problems = Model::parse("x/y", &text).expect_err("not rectangles");
-        let found: Vec<_> = problems
-            .iter()
-            .map(|p| (p.message(), &text[p.span().offset()..p.span().offset() + p.span().len()]))
-            .collect();
-        assert_eq!(
-            found,
-            [("this element is not a rectangle", "b_"), ("this element is not a rectangle", "c")]
-        );
-    }
-
-    #[test]
-    fn reports_characters_that_are_not_one_column_wide() {
-        let text = r#"model { name "X"; kind "server"; face "中b\n\tb"; legend { b bay } }"#;
-        assert_eq!(
-            messages(text),
-            [
-                "`中` is 2 columns wide; every character must be one column",
-                "control characters such as `\\t` cannot be drawn",
-            ]
-        );
-        let text = server(["中b", "~"], "b bay; ~ fill");
-        assert_eq!(
-            pointed(&text),
-            [(
-                "`中` is 2 columns wide; every character must be one column".to_owned(),
-                "中".to_owned()
-            )]
-        );
-    }
-
-    #[test]
-    fn links_number_fields_to_the_element_they_touch() {
-        let text = server(["##b c##", "~"], r##""#" number gap=1; b bay; c psu; ~ fill"##);
-        let face = normal_face(&text);
-        let linked: Vec<_> = face
-            .elements()
-            .iter()
-            .filter_map(|e| Some((e.column, face.elements()[e.number_of?].key)))
-            .collect();
-        assert_eq!(linked, [(0, 'b'), (5, 'c')]);
-    }
-
-    #[test]
-    fn reports_number_fields_without_one_element_to_number() {
-        let text = server(["## b b##b #b", "~"], r##""#" number gap=1; b bay; ~ fill"##);
-        assert_eq!(
-            messages(&text),
-            [
-                "a number field must touch a bay, port or other numbered element",
-                "this number field touches numbered elements on both sides",
-                "this number field has no room for a number besides its `gap=1`",
-            ]
-        );
-    }
-
-    #[test]
-    fn reports_glyphs_that_do_not_fit_their_elements() {
-        let text = server(["b__ b_ cc", "~"], r#"b bay="abc"; c psu="中"; ~ fill"#);
-        let problems = Model::parse("x/y", &text).expect_err("glyphs that do not fit");
-        let found: Vec<_> = problems
-            .iter()
-            .map(|p| (p.message(), &text[p.span().offset()..p.span().offset() + p.span().len()]))
-            .collect();
-        assert_eq!(
-            found,
-            [
-                ("this glyph has 3 characters, but a `b` element covers 2 cells", r#"bay="abc""#),
-                ("`中` is 2 columns wide; every character must be one column", r#"psu="中""#),
-            ]
-        );
-    }
-
-    #[test]
-    fn accepts_glyphs_of_one_character_or_one_per_cell() {
-        let text = server(["b__ c c", "~"], r#"b bay="abc"; c psu="■"; ~ fill"#);
-        assert!(Model::parse("x/y", &text).is_ok());
-    }
-
-    #[test]
-    fn reports_legend_keys_that_no_face_uses() {
-        let text = server(["p", "~"], "p power; b bay; ~ fill");
-        assert_eq!(messages(&text), ["legend key `b` is not used by any face"]);
     }
 }

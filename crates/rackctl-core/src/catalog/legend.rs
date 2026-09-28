@@ -737,10 +737,20 @@ mod tests {
     }
 
     #[test]
-    fn explains_that_health_moved_to_the_power_led() {
-        let (_, problems) = parse("h health");
-        assert_eq!(problems[0].message(), "unknown legend type `health`");
-        assert_eq!(problems[0].help(), Some("the power LED shows the health; use `power`"));
+    fn explains_common_mistakes() {
+        let (_, problems) = parse(r#"h health; b first=0 bay="■"; c bay faild="x""#);
+        let found: Vec<_> = problems.iter().map(|p| (p.message(), p.help())).collect();
+        assert_eq!(
+            found,
+            [
+                (
+                    "unknown legend type `health`",
+                    Some("the power LED shows the health; use `power`")
+                ),
+                ("unknown legend type `first`", Some("the type must come first: `b bay=...`")),
+                ("unknown property `faild` on `c`", Some("did you mean `failed`?")),
+            ]
+        );
     }
 
     #[test]
@@ -765,13 +775,6 @@ mod tests {
                 ("`name` does not take a value", None),
             ]
         );
-    }
-
-    #[test]
-    fn suggests_state_names() {
-        let (_, problems) = parse(r#"b bay faild="x""#);
-        assert_eq!(problems[0].message(), "unknown property `faild` on `b`");
-        assert_eq!(problems[0].help(), Some("did you mean `failed`?"));
     }
 
     #[test]
@@ -859,13 +862,6 @@ mod tests {
                 ),
             ]
         );
-    }
-
-    #[test]
-    fn explains_that_the_type_comes_first() {
-        let (_, problems) = parse(r#"b first=0 bay="■""#);
-        assert_eq!(problems[0].message(), "unknown legend type `first`");
-        assert_eq!(problems[0].help(), Some("the type must come first: `b bay=...`"));
     }
 
     #[test]

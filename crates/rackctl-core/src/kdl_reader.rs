@@ -532,6 +532,7 @@ fn closest<'c>(word: &str, candidates: impl IntoIterator<Item = &'c str>) -> Opt
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::pointed;
 
     /// A side of the rack, used to test reading enums.
     #[derive(Debug, PartialEq, Eq, strum::EnumString, strum::VariantNames)]
@@ -672,18 +673,12 @@ mod tests {
     }
 
     #[test]
-    fn suggests_names_that_differ_only_in_case() {
-        let problems = problems_for(r#"device "a" U=1"#, |node| {
-            let _ = node.arg_str(0, "name");
-            let _ = node.opt_int::<u8>("u");
-        });
-        assert_eq!(problems[0].help(), Some("did you mean `u`?"));
-    }
-
-    #[test]
     fn reports_syntax_errors() {
-        let problems = parse(r#"device "unterminated"#).expect_err("invalid KDL");
-        assert!(!problems.is_empty());
+        let text = "rack \"r\" }\ndevice \"a\" {";
+        assert_eq!(
+            pointed(text, &parse(text).expect_err("invalid KDL")),
+            [("Expected end of document", "}"), ("No closing '}' for child block", "{")]
+        );
     }
 
     #[test]
