@@ -3,6 +3,7 @@
 //! Each subcommand runs once, prints its result and exits. Without a subcommand, rackctl
 //! prints its help.
 
+mod catalog;
 mod check;
 mod paths;
 mod style;
@@ -39,6 +40,17 @@ struct Cli {
 enum Command {
     /// Check the configuration and the catalog, and summarize the rack
     Check,
+    /// Work with the device catalog
+    Catalog {
+        #[command(subcommand)]
+        command: CatalogCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum CatalogCommand {
+    /// Draw a model's face with a sample status
+    Show(catalog::ShowArgs),
 }
 
 /// Runs rackctl with the arguments of the process and returns its exit code.
@@ -49,6 +61,9 @@ pub fn run() -> ExitCode {
     let locations = Locations::from_env();
     match cli.command {
         Some(Command::Check) => check::run(cli.config, &locations),
+        Some(Command::Catalog { command: CatalogCommand::Show(args) }) => {
+            catalog::show(&args, cli.config, &locations)
+        }
         None => {
             let _ = Cli::command().print_help();
             ExitCode::SUCCESS

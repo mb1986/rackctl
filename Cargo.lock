@@ -1096,6 +1096,8 @@ dependencies = [
  "indoc",
  "miette",
  "rackctl-core",
+ "rackctl-tui",
+ "ratatui",
  "tempfile",
  "textwrap",
 ]
