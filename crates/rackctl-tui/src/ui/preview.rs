@@ -7,11 +7,10 @@ use ratatui::style::Style;
 use ratatui::widgets::Widget;
 
 use crate::ui::art::{FaceLayout, FaceView, Panel, SAMPLE_AMPS, Sample, sample_looks};
+use crate::ui::rack::FACE_WIDTH;
 use crate::ui::slice::Slice;
 use crate::ui::theme::RACK;
 
-/// The width of a face between its ears.
-const FACE_WIDTH: usize = 48;
 /// The lowest unit of the drawn device.
 const UNIT: u16 = 10;
 /// The units a strip spans when its model gives no height.

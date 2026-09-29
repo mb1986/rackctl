@@ -11,8 +11,21 @@ use crate::ui::art::{FaceLayout, FaceView, Look, Panel, SAMPLE_AMPS, Sample, sam
 use crate::ui::rowmap::{LabelRow, RowKind, RowMap};
 use crate::ui::theme::{RACK, UNDERLINE};
 
+/// The default width of a face between its ears.
+pub const FACE_WIDTH: usize = 48;
+
 /// Columns for a unit number and its space, on each side.
 const LABEL: u16 = 3;
+
+/// Draws the front view of `rack` at the default size, with the sample status.
+#[must_use]
+pub fn front_view(rack: &Rack, catalog: &Catalog) -> Buffer {
+    let art = RackArt::new(rack, catalog, FACE_WIDTH, 2, LabelRow::default());
+    let view = RackView { art: &art };
+    let mut buf = Buffer::empty(Rect::new(0, 0, view.width(), view.height()));
+    view.render(buf.area, &mut buf);
+    buf
+}
 
 /// A device ready to draw.
 struct DeviceArt<'a> {
