@@ -240,8 +240,8 @@ fn read_model(id: &str, node: &KdlNode, problems: &mut Vec<Problem>) -> Option<M
     // A model without a height is 1U; an invalid one has been reported.
     let face_height = if seen.contains("height") { height } else { Some(1) };
     check_faces(&mut faces, mount, face_height, problems);
-    cut_faces(&mut faces, &legend, problems);
-    check_glyphs(&faces, &legend, problems);
+    let rectangles = cut_faces(&mut faces, &legend, problems);
+    check_glyphs(&faces, &rectangles, &legend, problems);
     number_faces(&mut faces, &legend, &components, problems);
     // A face that is present but invalid has already been reported.
     if let Some(span) = legend_span.filter(|_| !seen.contains("face")) {
