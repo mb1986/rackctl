@@ -1,7 +1,7 @@
-//! The rack: its devices in their slots, with rails and unit numbers.
+//! The rack: its devices in their slots, with rails and unit numbers, and strips beside it.
 
-use rackctl_core::catalog::{Catalog, Face, Model};
-use rackctl_core::rack::{self, Device, Placement, Rack, UnitRange};
+use rackctl_core::catalog::{Catalog, Face, Model, STRIP_WIDTH};
+use rackctl_core::rack::{self, Device, Placement, Rack, Side, UnitRange};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -24,19 +24,56 @@ struct DeviceArt<'a> {
     units: UnitRange,
 }
 
-/// The front devices of a rack, ready to draw.
+impl<'a> DeviceArt<'a> {
+    /// Prepares `face` laid out as `layout`, with the sample status.
+    fn new(
+        device: &'a Device,
+        model: &'a Model,
+        face: &'a Face,
+        layout: FaceLayout,
+        units: UnitRange,
+    ) -> Self {
+        let looks = sample_looks(model, face, Sample::Normal);
+        Self { device, model, face, layout, looks, units }
+    }
+
+    fn panel(&self) -> Panel<'_> {
+        Panel {
+            face: FaceView {
+                model: self.model,
+                face: self.face,
+                layout: &self.layout,
+                name: &self.device.id,
+                amps: SAMPLE_AMPS,
+                looks: &self.looks,
+                numbers: false,
+            },
+        }
+    }
+}
+
+/// A rack's front view, ready to draw: its devices and strips, and its screen rows.
 pub struct RackArt<'a> {
-    units: u16,
     width: usize,
+    map: RowMap,
     devices: Vec<DeviceArt<'a>>,
+    /// Strips on each side as seen from the front, nearest to the rack first.
+    left: Vec<DeviceArt<'a>>,
+    right: Vec<DeviceArt<'a>>,
 }
 
 impl<'a> RackArt<'a> {
-    /// Prepares the front devices of `rack` with faces `width` columns wide and the sample
-    /// status. Devices without a valid model or a normal face are left out.
+    /// Prepares the front view of `rack` with faces `width` columns wide and the sample
+    /// status. Devices without a valid model or a face for their place are left out.
     #[must_use]
-    pub fn new(rack: &'a Rack, catalog: &'a Catalog, width: usize) -> Self {
-        let devices = rack
+    pub fn new(
+        rack: &'a Rack,
+        catalog: &'a Catalog,
+        width: usize,
+        rows_per_unit: u16,
+        label: LabelRow,
+    ) -> Self {
+        let devices: Vec<DeviceArt> = rack
             .devices
             .iter()
             .filter(|device| {
@@ -46,62 +83,108 @@ impl<'a> RackArt<'a> {
             .filter_map(|device| {
                 let model = catalog.model(&device.model).ok()?;
                 let face = model.faces.normal.as_ref()?;
-                Some(DeviceArt {
-                    device,
-                    model,
-                    face,
-                    layout: FaceLayout::new(face, width),
-                    looks: sample_looks(model, face, Sample::Normal),
-                    units: device.units(model, rack.units),
-                })
+                let units = device.units(model, rack.units);
+                Some(DeviceArt::new(device, model, face, FaceLayout::new(face, width), units))
             })
             .collect();
-        Self { units: u16::from(rack.units), width, devices }
+        let slots: Vec<(usize, UnitRange)> =
+            devices.iter().enumerate().map(|(index, device)| (index, device.units)).collect();
+        let map = RowMap::new(u16::from(rack.units), &slots, rows_per_unit, label);
+
+        let (mut left, mut right) = (Vec::new(), Vec::new());
+        for device in &rack.devices {
+            let Placement::Strip { side, .. } = device.placement else { continue };
+            let Ok(model) = catalog.model(&device.model) else { continue };
+            let Some(face) = &model.faces.strip else { continue };
+            let units = device.units(model, rack.units);
+            // The frame takes the first and last row.
+            let height = map.span(units).len().saturating_sub(2);
+            let layout = FaceLayout::stretched(face, STRIP_WIDTH, height);
+            let strip = DeviceArt::new(device, model, face, layout, units);
+            match seen_from_front(side, device.face) {
+                Side::Left => left.push(strip),
+                Side::Right => right.push(strip),
+            }
+        }
+        Self { width, map, devices, left, right }
     }
 
-    /// Maps the rack to screen rows.
+    /// Returns the rack's screen rows.
     #[must_use]
-    pub fn row_map(&self, rows_per_unit: u16, label: LabelRow) -> RowMap {
-        let devices: Vec<(usize, UnitRange)> =
-            self.devices.iter().enumerate().map(|(index, device)| (index, device.units)).collect();
-        RowMap::new(self.units, &devices, rows_per_unit, label)
+    pub const fn map(&self) -> &RowMap {
+        &self.map
     }
 }
 
-/// The rows of a row map, with unit numbers and rails on each side.
+/// Returns the side a strip is on as seen from the front: a rear strip is mirrored.
+const fn seen_from_front(side: Side, face: rack::Face) -> Side {
+    match (side, face) {
+        (side, rack::Face::Front) => side,
+        (Side::Left, rack::Face::Rear) => Side::Right,
+        (Side::Right, rack::Face::Rear) => Side::Left,
+    }
+}
+
+/// The rack's rows with unit numbers and rails on each side, and its strips beside them.
 #[derive(Clone, Copy)]
 pub struct RackView<'a> {
     pub art: &'a RackArt<'a>,
-    pub map: &'a RowMap,
 }
 
 impl RackView<'_> {
-    /// Returns the view's width: a device, its rails and unit numbers.
+    /// Returns the view's width: a device, its rails and unit numbers, and the strips.
     #[must_use]
     pub fn width(&self) -> u16 {
-        self.panel_width() + 2 * (LABEL + 1)
+        self.rack_width() + strip_columns(self.art.left.len() + self.art.right.len())
     }
 
     /// Returns the view's height: one line per row.
     #[must_use]
     pub fn height(&self) -> u16 {
-        u16::try_from(self.map.rows().len()).unwrap_or(u16::MAX)
+        u16::try_from(self.art.map.rows().len()).unwrap_or(u16::MAX)
+    }
+
+    /// Returns the width of the rack: a device, its rails and unit numbers.
+    fn rack_width(self) -> u16 {
+        self.panel_width() + 2 * (LABEL + 1)
     }
 
     /// Returns the width of a device between the rails, ears included.
-    fn panel_width(&self) -> u16 {
+    fn panel_width(self) -> u16 {
         u16::try_from(self.art.width + 2).unwrap_or(u16::MAX)
     }
+
+    /// Draws a strip at column `x`, over the rows of its units.
+    fn render_strip(self, strip: &DeviceArt<'_>, x: u16, area: Rect, buf: &mut Buffer) {
+        let rows = self.art.map.span(strip.units);
+        let panel = strip.panel();
+        let y = area.y + u16::try_from(rows.start).unwrap_or(u16::MAX);
+        panel.render(Rect { x, y, width: panel.width(), height: panel.height() }, buf);
+    }
+}
+
+/// Returns the columns of `count` strips, each with the gap next to it.
+fn strip_columns(count: usize) -> u16 {
+    u16::try_from((STRIP_WIDTH + 3) * count).unwrap_or(u16::MAX)
 }
 
 impl Widget for RackView<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let area = area.intersection(Rect { width: self.width(), height: self.height(), ..area });
+        let rack_x = area.x + strip_columns(self.art.left.len());
+        for (index, strip) in self.art.left.iter().enumerate() {
+            self.render_strip(strip, rack_x - strip_columns(index + 1), area, buf);
+        }
+        let after = rack_x + self.rack_width() + 1;
+        for (index, strip) in self.art.right.iter().enumerate() {
+            self.render_strip(strip, after + strip_columns(index), area, buf);
+        }
+
         let rack = Style::new().fg(RACK);
-        let inside = Rect { x: area.x + LABEL + 1, width: self.panel_width(), ..area };
-        for (row, y) in self.map.rows().iter().zip(area.top()..area.bottom()) {
+        let inside = Rect { x: rack_x + LABEL + 1, width: self.panel_width(), ..area };
+        for (row, y) in self.art.map.rows().iter().zip(area.top()..area.bottom()) {
             let label = row.label.map_or_else(String::new, |unit| unit.to_string());
-            buf.set_string(area.x, y, format!("{label:>2} "), rack);
+            buf.set_string(rack_x, y, format!("{label:>2} "), rack);
             buf.set_string(inside.x - 1, y, "┊", rack);
             buf.set_string(inside.right(), y, "┊", rack);
             buf.set_string(inside.right() + 1, y, format!(" {label:>2}"), rack);
@@ -118,18 +201,7 @@ impl Widget for RackView<'_> {
                     }
                 }
                 RowKind::Device { index, row: 0 } => {
-                    let device = &self.art.devices[index];
-                    let panel = Panel {
-                        face: FaceView {
-                            model: device.model,
-                            face: device.face,
-                            layout: &device.layout,
-                            name: &device.device.id,
-                            amps: SAMPLE_AMPS,
-                            looks: &device.looks,
-                            numbers: false,
-                        },
-                    };
+                    let panel = self.art.devices[index].panel();
                     panel.render(Rect { y, height: panel.height(), ..inside }, buf);
                 }
                 RowKind::Device { .. } => {}
@@ -171,6 +243,16 @@ mod tests {
                     """#
                   legend { p power; n name } }"##},
         ),
+        (
+            "x/strip.kdl",
+            indoc! {r##"
+                model { name "Strip"; kind "pdu"; mount "side"; height 2
+                  face strip=#true #"""
+                    p
+                    ~
+                    """#
+                  legend { p power; ~ fill } }"##},
+        ),
     ];
 
     /// Draws a 4-unit rack of `devices`, with faces 6 columns wide.
@@ -182,9 +264,8 @@ mod tests {
         }
         let catalog = Catalog::open(&[dir.path()]).expect("readable catalog");
         let rack = Rack::parse(&format!("rack \"r\" units=4 {{\n{devices}\n}}")).expect("rack");
-        let art = RackArt::new(&rack, &catalog, 6);
-        let map = art.row_map(2, LabelRow::Top);
-        let view = RackView { art: &art, map: &map };
+        let art = RackArt::new(&rack, &catalog, 6, 2, LabelRow::Top);
+        let view = RackView { art: &art };
         let mut buf = Buffer::empty(Rect::new(0, 0, view.width(), view.height()));
         view.render(buf.area, &mut buf);
         buf
@@ -217,5 +298,24 @@ mod tests {
         assert!((4..12).all(|x| underlined(x, 3)));
         assert!(!underlined(3, 3) && !underlined(12, 3));
         assert!(!underlined(4, 2));
+    }
+
+    #[test]
+    fn draws_strips_beside_the_rack() {
+        let strips = r#"
+            device "s1" model="x/strip" mount="left"
+            device "s2" model="x/strip" mount="right" u=3 face="rear"
+            device "s3" model="x/strip" mount="right""#;
+        let rows = [
+            "🭽▔▔▔▔▔🭾          4 ┊┓● a   ┏┊  4        ",
+            "▏●    ▕            ┊┛      ┗┊           ",
+            "▏     ▕          3 ┊·┊    ┊·┊  3        ",
+            "🭼▁▁▁▁▁🭿            ┊·┊    ┊·┊           ",
+            "        🭽▔▔▔▔▔🭾  2 ┊┓● b   ┏┊  2 🭽▔▔▔▔▔🭾",
+            "        ▏●    ▕    ┊┃      ┃┊    ▏●    ▕",
+            "        ▏     ▕  1 ┊┃      ┃┊  1 ▏     ▕",
+            "        🭼▁▁▁▁▁🭿    ┊┛      ┗┊    🭼▁▁▁▁▁🭿",
+        ];
+        assert_eq!(plain(&draw(&format!("{DEVICES}{strips}"))), rows);
     }
 }
