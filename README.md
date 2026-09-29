@@ -22,6 +22,7 @@ control and the terminal UI are not available yet.
 ```sh
 rackctl check              # check ~/.config/rackctl/rack.kdl and summarize the rack
 rackctl check -c rack.kdl  # check another rack file
+rackctl rack               # draw the rack's front view
 ```
 
 `check` exits with code 2 when the configuration has problems, and reports each of them

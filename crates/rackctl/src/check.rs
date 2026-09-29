@@ -9,14 +9,13 @@ use std::process::ExitCode;
 
 use rackctl_core::catalog::{Catalog, Kind, Origin};
 use rackctl_core::config;
-use rackctl_core::kdl_reader::FileError;
 use rackctl_core::rack::{Placement, Rack};
 use textwrap::core::Word;
 use textwrap::{Options, WordSeparator, WordSplitter};
 
 use crate::paths::Locations;
 use crate::style::{ERROR, HEADING, LABEL, NOTE, OK};
-use crate::{CONFIG_ERROR, open_catalog};
+use crate::{CONFIG_ERROR, find_rack_file, open_catalog, write_reports};
 
 /// The width that long lines of the summary are wrapped to.
 const WIDTH: usize = 80;
@@ -27,12 +26,7 @@ const LABEL_WIDTH: usize = 9;
 /// Runs the command. `config` is the rack file named with `-c`, if any.
 pub fn run(config: Option<PathBuf>, locations: &Locations) -> io::Result<ExitCode> {
     let mut err = io::stderr();
-    let Some(rack_file) = config.or_else(|| locations.rack_file()) else {
-        writeln!(
-            err,
-            "rackctl: cannot find the configuration because $HOME is not set; \
-             use -c FILE or set $RACKCTL_CONFIG"
-        )?;
+    let Some(rack_file) = find_rack_file(config, locations, &mut err)? else {
         return Ok(ExitCode::from(CONFIG_ERROR));
     };
     let Some(catalog) = open_catalog(Some(&rack_file), locations, &mut err)? else {
@@ -61,10 +55,7 @@ pub fn run(config: Option<PathBuf>, locations: &Locations) -> io::Result<ExitCod
     }
     out.flush()?;
 
-    let failed = rack.as_ref().err().into_iter().chain(invalid_models);
-    for report in failed.flat_map(FileError::reports) {
-        write!(err, "\n{report:?}")?;
-    }
+    write_reports(&mut err, rack.as_ref().err().into_iter().chain(invalid_models))?;
     Ok(ExitCode::from(CONFIG_ERROR))
 }
 

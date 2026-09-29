@@ -6,6 +6,7 @@
 mod catalog;
 mod check;
 mod paths;
+mod rack;
 mod style;
 
 use std::io::{self, Write};
@@ -15,6 +16,7 @@ use std::process::ExitCode;
 use anstream::{AutoStream, ColorChoice};
 use clap::{CommandFactory, Parser, Subcommand};
 use rackctl_core::catalog::Catalog;
+use rackctl_core::kdl_reader::FileError;
 
 use crate::paths::Locations;
 
@@ -41,6 +43,8 @@ struct Cli {
 enum Command {
     /// Check the configuration and the catalog, and summarize the rack
     Check,
+    /// Draw the rack's front view with a sample status
+    Rack(rack::RackArgs),
     /// Work with the device catalog
     Catalog {
         #[command(subcommand)]
@@ -62,6 +66,7 @@ pub fn run() -> ExitCode {
     let locations = Locations::from_env();
     let result = match cli.command {
         Some(Command::Check) => check::run(cli.config, &locations),
+        Some(Command::Rack(args)) => rack::run(&args, cli.config, &locations),
         Some(Command::Catalog { command: CatalogCommand::Show(args) }) => {
             catalog::show(&args, cli.config, &locations)
         }
@@ -79,6 +84,35 @@ fn exit_code(result: io::Result<ExitCode>) -> ExitCode {
         }
         ExitCode::FAILURE
     })
+}
+
+/// Returns the rack file: `config`, or the default one. Returns `None` after reporting that
+/// there is no default.
+fn find_rack_file(
+    config: Option<PathBuf>,
+    locations: &Locations,
+    err: &mut impl Write,
+) -> io::Result<Option<PathBuf>> {
+    let rack_file = config.or_else(|| locations.rack_file());
+    if rack_file.is_none() {
+        writeln!(
+            err,
+            "rackctl: cannot find the configuration because $HOME is not set; \
+             use -c FILE or set $RACKCTL_CONFIG"
+        )?;
+    }
+    Ok(rack_file)
+}
+
+/// Writes the problems of `files`, each report after a blank line.
+fn write_reports<'a>(
+    err: &mut impl Write,
+    files: impl IntoIterator<Item = &'a FileError>,
+) -> io::Result<()> {
+    for report in files.into_iter().flat_map(FileError::reports) {
+        write!(err, "\n{report:?}")?;
+    }
+    Ok(())
 }
 
 /// Opens the built-in catalog with the user's models next to `rack_file`, if one is given.

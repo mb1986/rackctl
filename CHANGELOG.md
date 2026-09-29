@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `rackctl catalog show <id>`: draws a model's face in a slice of rack, or a side strip over
   its span, with a sample status (`--state normal|off`) or each element's number
   (`--numbers`).
+- `rackctl rack`: draws the rack's front view with a sample status: each device's face in
+  its units, empty units, unit numbers, and side strips, with a rear strip mirrored.
 - Device faces: catalog models describe their front panel as a picture with a legend, with
   checked numbering of bays, PSUs, NICs, ports and outlets.
 - Device catalog with selected models of Dell, Cisco, APC, HPE and Ubiquiti hardware, plus
