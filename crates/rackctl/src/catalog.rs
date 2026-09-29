@@ -5,13 +5,13 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Args, ValueEnum};
-use rackctl_core::catalog::{Catalog, ModelError};
+use rackctl_core::catalog::ModelError;
 use rackctl_tui::ui::art::Sample;
 use rackctl_tui::ui::preview::preview;
 use rackctl_tui::ui::text;
 
-use crate::CONFIG_ERROR;
-use crate::paths::{self, Locations};
+use crate::paths::Locations;
+use crate::{CONFIG_ERROR, open_catalog};
 
 #[derive(Debug, Args)]
 pub struct ShowArgs {
@@ -38,25 +38,16 @@ enum SampleState {
 }
 
 /// Runs `catalog show`. `config` is the rack file named with `-c`, whose user catalog is used.
-pub fn show(args: &ShowArgs, config: Option<PathBuf>, locations: &Locations) -> ExitCode {
-    draw(args, config, locations).unwrap_or_else(|error| {
-        if error.kind() != io::ErrorKind::BrokenPipe {
-            let _ = writeln!(io::stderr(), "rackctl: cannot write the output: {error}");
-        }
-        ExitCode::FAILURE
-    })
-}
-
-fn draw(args: &ShowArgs, config: Option<PathBuf>, locations: &Locations) -> io::Result<ExitCode> {
+pub fn show(
+    args: &ShowArgs,
+    config: Option<PathBuf>,
+    locations: &Locations,
+) -> io::Result<ExitCode> {
     let mut err = io::stderr();
-    let mut catalog = Catalog::builtin();
-    if let Some(rack_file) = config.or_else(|| locations.rack_file()) {
-        let user_dir = paths::user_catalog(&rack_file);
-        if let Err(error) = catalog.add_dirs(&[&user_dir]) {
-            writeln!(err, "rackctl: cannot read {}: {error}", locations.display(&user_dir))?;
-            return Ok(ExitCode::from(CONFIG_ERROR));
-        }
-    }
+    let rack_file = config.or_else(|| locations.rack_file());
+    let Some(catalog) = open_catalog(rack_file.as_deref(), locations, &mut err)? else {
+        return Ok(ExitCode::from(CONFIG_ERROR));
+    };
     let model = match catalog.model(&args.id) {
         Ok(model) => model,
         Err(ModelError::Unknown { id }) => {

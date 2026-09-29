@@ -14,9 +14,9 @@ use rackctl_core::rack::{Placement, Rack};
 use textwrap::core::Word;
 use textwrap::{Options, WordSeparator, WordSplitter};
 
-use crate::CONFIG_ERROR;
-use crate::paths::{self, Locations};
+use crate::paths::Locations;
 use crate::style::{ERROR, HEADING, LABEL, NOTE, OK};
+use crate::{CONFIG_ERROR, open_catalog};
 
 /// The width that long lines of the summary are wrapped to.
 const WIDTH: usize = 80;
@@ -25,17 +25,7 @@ const WIDTH: usize = 80;
 const LABEL_WIDTH: usize = 9;
 
 /// Runs the command. `config` is the rack file named with `-c`, if any.
-pub fn run(config: Option<PathBuf>, locations: &Locations) -> ExitCode {
-    check(config, locations).unwrap_or_else(|error| {
-        // A closed pipe, as in `rackctl check | head -1`, is not an error.
-        if error.kind() != io::ErrorKind::BrokenPipe {
-            let _ = writeln!(io::stderr(), "rackctl: cannot write the output: {error}");
-        }
-        ExitCode::FAILURE
-    })
-}
-
-fn check(config: Option<PathBuf>, locations: &Locations) -> io::Result<ExitCode> {
+pub fn run(config: Option<PathBuf>, locations: &Locations) -> io::Result<ExitCode> {
     let mut err = io::stderr();
     let Some(rack_file) = config.or_else(|| locations.rack_file()) else {
         writeln!(
@@ -45,12 +35,9 @@ fn check(config: Option<PathBuf>, locations: &Locations) -> io::Result<ExitCode>
         )?;
         return Ok(ExitCode::from(CONFIG_ERROR));
     };
-    let mut catalog = Catalog::builtin();
-    let user_dir = paths::user_catalog(&rack_file);
-    if let Err(error) = catalog.add_dirs(&[&user_dir]) {
-        writeln!(err, "rackctl: cannot read {}: {error}", locations.display(&user_dir))?;
+    let Some(catalog) = open_catalog(Some(&rack_file), locations, &mut err)? else {
         return Ok(ExitCode::from(CONFIG_ERROR));
-    }
+    };
 
     let mut out = anstream::stdout();
     let invalid_models = catalog.invalid_models();

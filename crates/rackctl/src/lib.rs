@@ -8,12 +8,13 @@ mod check;
 mod paths;
 mod style;
 
-use std::io;
-use std::path::PathBuf;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anstream::{AutoStream, ColorChoice};
 use clap::{CommandFactory, Parser, Subcommand};
+use rackctl_core::catalog::Catalog;
 
 use crate::paths::Locations;
 
@@ -59,16 +60,43 @@ pub fn run() -> ExitCode {
     let cli = Cli::parse();
     set_report_style();
     let locations = Locations::from_env();
-    match cli.command {
+    let result = match cli.command {
         Some(Command::Check) => check::run(cli.config, &locations),
         Some(Command::Catalog { command: CatalogCommand::Show(args) }) => {
             catalog::show(&args, cli.config, &locations)
         }
-        None => {
-            let _ = Cli::command().print_help();
-            ExitCode::SUCCESS
+        None => Cli::command().print_help().map(|()| ExitCode::SUCCESS),
+    };
+    exit_code(result)
+}
+
+/// Returns a command's exit code. A closed pipe, as in `rackctl check | head -1`, is not an
+/// error.
+fn exit_code(result: io::Result<ExitCode>) -> ExitCode {
+    result.unwrap_or_else(|error| {
+        if error.kind() != io::ErrorKind::BrokenPipe {
+            let _ = writeln!(io::stderr(), "rackctl: cannot write the output: {error}");
+        }
+        ExitCode::FAILURE
+    })
+}
+
+/// Opens the built-in catalog with the user's models next to `rack_file`, if one is given.
+/// Returns `None` after reporting a user catalog that cannot be read.
+fn open_catalog(
+    rack_file: Option<&Path>,
+    locations: &Locations,
+    err: &mut impl Write,
+) -> io::Result<Option<Catalog>> {
+    let mut catalog = Catalog::builtin();
+    if let Some(rack_file) = rack_file {
+        let user_dir = paths::user_catalog(rack_file);
+        if let Err(error) = catalog.add_dirs(&[&user_dir]) {
+            writeln!(err, "rackctl: cannot read {}: {error}", locations.display(&user_dir))?;
+            return Ok(None);
         }
     }
+    Ok(Some(catalog))
 }
 
 /// Makes error reports use colour exactly when the rest of the output does: not when
