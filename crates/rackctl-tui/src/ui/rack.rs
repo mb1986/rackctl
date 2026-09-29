@@ -21,15 +21,15 @@ const LABEL: u16 = 3;
 #[must_use]
 pub fn front_view(rack: &Rack, catalog: &Catalog) -> Buffer {
     let art = RackArt::new(rack, catalog, FACE_WIDTH, 2, LabelRow::default());
-    let view = RackView { art: &art };
+    let view = RackView { art: &art, numbers: false };
     let mut buf = Buffer::empty(Rect::new(0, 0, view.width(), view.height()));
     view.render(buf.area, &mut buf);
     buf
 }
 
 /// A device ready to draw.
-struct DeviceArt<'a> {
-    device: &'a Device,
+pub(crate) struct DeviceArt<'a> {
+    name: &'a str,
     model: &'a Model,
     face: &'a Face,
     layout: FaceLayout,
@@ -38,8 +38,20 @@ struct DeviceArt<'a> {
 }
 
 impl<'a> DeviceArt<'a> {
-    /// Prepares `face` laid out as `layout`, with the sample status.
-    fn new(
+    /// Prepares the device `name` covering `units`, its `face` laid out as `layout`.
+    pub(crate) const fn new(
+        name: &'a str,
+        model: &'a Model,
+        face: &'a Face,
+        layout: FaceLayout,
+        looks: Vec<Look>,
+        units: UnitRange,
+    ) -> Self {
+        Self { name, model, face, layout, looks, units }
+    }
+
+    /// Prepares a device with the sample status.
+    fn sample(
         device: &'a Device,
         model: &'a Model,
         face: &'a Face,
@@ -47,19 +59,19 @@ impl<'a> DeviceArt<'a> {
         units: UnitRange,
     ) -> Self {
         let looks = sample_looks(model, face, Sample::Normal);
-        Self { device, model, face, layout, looks, units }
+        Self::new(&device.id, model, face, layout, looks, units)
     }
 
-    fn panel(&self) -> Panel<'_> {
+    fn panel(&self, numbers: bool) -> Panel<'_> {
         Panel {
             face: FaceView {
                 model: self.model,
                 face: self.face,
                 layout: &self.layout,
-                name: &self.device.id,
+                name: self.name,
                 amps: SAMPLE_AMPS,
                 looks: &self.looks,
-                numbers: false,
+                numbers,
             },
         }
     }
@@ -97,29 +109,41 @@ impl<'a> RackArt<'a> {
                 let model = catalog.model(&device.model).ok()?;
                 let face = model.faces.normal.as_ref()?;
                 let units = device.units(model, rack.units);
-                Some(DeviceArt::new(device, model, face, FaceLayout::new(face, width), units))
+                Some(DeviceArt::sample(device, model, face, FaceLayout::new(face, width), units))
             })
             .collect();
-        let slots: Vec<(usize, UnitRange)> =
-            devices.iter().enumerate().map(|(index, device)| (index, device.units)).collect();
-        let map = RowMap::new(u16::from(rack.units), &slots, rows_per_unit, label);
+        let mut art =
+            Self::from_devices(u16::from(rack.units), width, devices, rows_per_unit, label);
 
-        let (mut left, mut right) = (Vec::new(), Vec::new());
         for device in &rack.devices {
             let Placement::Strip { side, .. } = device.placement else { continue };
             let Ok(model) = catalog.model(&device.model) else { continue };
             let Some(face) = &model.faces.strip else { continue };
             let units = device.units(model, rack.units);
             // The frame takes the first and last row.
-            let height = map.span(units).len().saturating_sub(2);
+            let height = art.map.span(units).len().saturating_sub(2);
             let layout = FaceLayout::stretched(face, STRIP_WIDTH, height);
-            let strip = DeviceArt::new(device, model, face, layout, units);
+            let strip = DeviceArt::sample(device, model, face, layout, units);
             match seen_from_front(side, device.face) {
-                Side::Left => left.push(strip),
-                Side::Right => right.push(strip),
+                Side::Left => art.left.push(strip),
+                Side::Right => art.right.push(strip),
             }
         }
-        Self { width, map, devices, left, right }
+        art
+    }
+
+    /// Prepares a rack of `units` with `devices` in its slots and no strips.
+    pub(crate) fn from_devices(
+        units: u16,
+        width: usize,
+        devices: Vec<DeviceArt<'a>>,
+        rows_per_unit: u16,
+        label: LabelRow,
+    ) -> Self {
+        let slots: Vec<(usize, UnitRange)> =
+            devices.iter().enumerate().map(|(index, device)| (index, device.units)).collect();
+        let map = RowMap::new(units, &slots, rows_per_unit, label);
+        Self { width, map, devices, left: Vec::new(), right: Vec::new() }
     }
 
     /// Returns the rack's screen rows.
@@ -142,6 +166,8 @@ const fn seen_from_front(side: Side, face: rack::Face) -> Side {
 #[derive(Clone, Copy)]
 pub struct RackView<'a> {
     pub art: &'a RackArt<'a>,
+    /// Whether numbered elements show their numbers instead of their glyphs.
+    pub numbers: bool,
 }
 
 impl RackView<'_> {
@@ -170,7 +196,7 @@ impl RackView<'_> {
     /// Draws a strip at column `x`, over the rows of its units.
     fn render_strip(self, strip: &DeviceArt<'_>, x: u16, area: Rect, buf: &mut Buffer) {
         let rows = self.art.map.span(strip.units);
-        let panel = strip.panel();
+        let panel = strip.panel(self.numbers);
         let y = area.y + u16::try_from(rows.start).unwrap_or(u16::MAX);
         panel.render(Rect { x, y, width: panel.width(), height: panel.height() }, buf);
     }
@@ -214,7 +240,7 @@ impl Widget for RackView<'_> {
                     }
                 }
                 RowKind::Device { index, row: 0 } => {
-                    let panel = self.art.devices[index].panel();
+                    let panel = self.art.devices[index].panel(self.numbers);
                     panel.render(Rect { y, height: panel.height(), ..inside }, buf);
                 }
                 RowKind::Device { .. } => {}
@@ -278,7 +304,7 @@ mod tests {
         let catalog = Catalog::open(&[dir.path()]).expect("readable catalog");
         let rack = Rack::parse(&format!("rack \"r\" units=4 {{\n{devices}\n}}")).expect("rack");
         let art = RackArt::new(&rack, &catalog, 6, 2, LabelRow::Top);
-        let view = RackView { art: &art };
+        let view = RackView { art: &art, numbers: false };
         let mut buf = Buffer::empty(Rect::new(0, 0, view.width(), view.height()));
         view.render(buf.area, &mut buf);
         buf
