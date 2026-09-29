@@ -68,6 +68,14 @@ pub struct Slot {
     pub sfp: Option<usize>,
 }
 
+impl Slot {
+    /// Returns whether the slot is a combo port: an RJ45 and an SFP element.
+    #[must_use]
+    pub const fn is_combo(self) -> bool {
+        self.element.is_some() && self.sfp.is_some()
+    }
+}
+
 /// The numbers of one part on a face, such as its ports: the elements that have each number,
 /// so that a status for port 17 finds its element directly.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,6 +101,13 @@ impl Numbers {
     #[must_use]
     pub const fn part(&self) -> Part {
         self.part
+    }
+
+    /// Returns the lowest number of `group`, if the face shows it.
+    #[must_use]
+    pub fn base(&self, group: Option<&str>) -> Option<u16> {
+        let segment = self.segments.iter().find(|segment| segment.group.as_deref() == group)?;
+        Some(segment.base)
     }
 
     /// Returns the elements with `number` in `group`: port XG3 is `get(Some("XG"), 3)`.
@@ -758,6 +773,12 @@ mod tests {
         assert_eq!(get(Some("XG"), 0), None);
         assert_eq!(get(Some("YY"), 1), None);
         assert!(face.numbers(Part::Bay).is_none());
+        assert!(numbers.get(None, 6).is_some_and(Slot::is_combo));
+        assert!(!numbers.get(None, 7).is_some_and(Slot::is_combo));
+        assert_eq!(
+            [None, Some("XG"), Some("YY")].map(|group| numbers.base(group)),
+            [Some(1), Some(1), None]
+        );
 
         // A combo counts once, and the groups count together.
         let picture = indoc! {r##"
