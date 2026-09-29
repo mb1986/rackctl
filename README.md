@@ -23,6 +23,7 @@ control and the terminal UI are not available yet.
 rackctl check              # check ~/.config/rackctl/rack.kdl and summarize the rack
 rackctl check -c rack.kdl  # check another rack file
 rackctl rack               # draw the rack's front view
+rackctl trace server:nic1  # follow the cables from an endpoint
 ```
 
 `check` exits with code 2 when the configuration has problems, and reports each of them

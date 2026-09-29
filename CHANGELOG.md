@@ -22,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as paths such as `net srv01:nic1 patch-32:b-f14 sw:11`. `rackctl check` reports unknown
   devices and endpoints, cables between the wrong kinds of endpoint, and endpoints used
   twice.
+- `rackctl trace <endpoint>`: follows the cables from an endpoint through patch panels, such
+  as `srv01:mgmt -> patch-32:15 -> sg300:10`.
 - Device faces: catalog models describe their front panel as a picture with a legend, with
   checked numbering of bays, PSUs, NICs, ports and outlets.
 - Device catalog with selected models of Dell, Cisco, APC, HPE and Ubiquiti hardware, plus

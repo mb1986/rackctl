@@ -8,15 +8,20 @@ mod check;
 mod paths;
 mod rack;
 mod style;
+mod trace;
 
 use std::io::{self, Write};
+use std::iter;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anstream::{AutoStream, ColorChoice};
 use clap::{CommandFactory, Parser, Subcommand};
 use rackctl_core::catalog::Catalog;
+use rackctl_core::config;
 use rackctl_core::kdl_reader::FileError;
+use rackctl_core::rack::Rack;
+use rackctl_core::wiring::Cabling;
 
 use crate::paths::Locations;
 
@@ -45,6 +50,8 @@ enum Command {
     Check,
     /// Draw the rack's front view with a sample status
     Rack(rack::RackArgs),
+    /// Follow the cables from an endpoint, through patch panels
+    Trace(trace::TraceArgs),
     /// Work with the device catalog
     Catalog {
         #[command(subcommand)]
@@ -67,6 +74,7 @@ pub fn run() -> ExitCode {
     let result = match cli.command {
         Some(Command::Check) => check::run(cli.config, &locations),
         Some(Command::Rack(args)) => rack::run(&args, cli.config, &locations),
+        Some(Command::Trace(args)) => trace::run(&args, cli.config, &locations),
         Some(Command::Catalog { command: CatalogCommand::Show(args) }) => {
             catalog::show(&args, cli.config, &locations)
         }
@@ -102,6 +110,44 @@ fn find_rack_file(
         )?;
     }
     Ok(rack_file)
+}
+
+/// A valid configuration: the catalog, the rack and its wiring.
+struct Setup {
+    catalog: Catalog,
+    rack: Rack,
+    wiring_file: PathBuf,
+    /// The cables, or `None` without a wiring file.
+    cabling: Option<Cabling>,
+}
+
+/// Loads the configuration named with `-c`, or the default one. Returns `None` after
+/// reporting its problems.
+fn load_setup(
+    config: Option<PathBuf>,
+    locations: &Locations,
+    err: &mut impl Write,
+) -> io::Result<Option<Setup>> {
+    let Some(rack_file) = find_rack_file(config, locations, err)? else { return Ok(None) };
+    let Some(catalog) = open_catalog(Some(&rack_file), locations, err)? else {
+        return Ok(None);
+    };
+    let rack = match config::load_rack(&rack_file, &catalog) {
+        Ok(rack) => rack,
+        Err(error) => {
+            write_reports(err, iter::once(&error).chain(catalog.invalid_models()))?;
+            return Ok(None);
+        }
+    };
+    let wiring_file = paths::wiring_file(&rack_file);
+    let cabling = match config::load_wiring(&wiring_file, &rack, &catalog) {
+        Ok(cabling) => cabling,
+        Err(error) => {
+            write_reports(err, iter::once(&error))?;
+            return Ok(None);
+        }
+    };
+    Ok(Some(Setup { catalog, rack, wiring_file, cabling }))
 }
 
 /// Writes the problems of `files`, each report after a blank line.
