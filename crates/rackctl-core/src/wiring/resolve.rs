@@ -142,7 +142,8 @@ impl Devices<'_> {
         let Some(&device) = self.ids.get(end.device.as_str()) else {
             return Err(problem(format!("unknown device `{}`", end.device))
                 .with_label("not in the rack")
-                .with_suggestion(&end.device, self.ids.keys().copied()));
+                // In file order, so that a tie is always settled the same way.
+                .with_suggestion(&end.device, self.rack.devices.iter().map(|d| d.id.as_str())));
         };
         let id = &self.rack.devices[device].id;
         let Some(model) = self.models[device] else {
@@ -433,6 +434,16 @@ pub(super) mod tests {
             side: Some(PatchSide::Front),
         };
         assert_eq!(cabling.link_at(front), Some(&cabling.links()[3]));
+    }
+
+    #[test]
+    fn suggests_the_first_of_equally_close_devices() {
+        // `srv0` is one edit from both `srv01` and `srv02`; the one written first wins.
+        for _ in 0..20 {
+            let (_, _, result) = resolve("net srv0:nic1 sw:1");
+            let problems = result.expect_err("problems");
+            assert_eq!(problems[0].help(), Some("did you mean `srv01`?"));
+        }
     }
 
     #[test]
