@@ -7,6 +7,7 @@ pub mod catalog;
 pub mod config;
 pub mod kdl_reader;
 pub mod rack;
+pub mod wiring;
 
 #[cfg(test)]
 mod testing;
