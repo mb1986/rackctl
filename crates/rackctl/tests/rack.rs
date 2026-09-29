@@ -44,3 +44,17 @@ fn reports_a_rack_with_problems_without_drawing_it() {
     assert!(output.stdout.is_empty());
     assert!(String::from_utf8_lossy(&output.stderr).contains("unknown model `nope/x`"));
 }
+
+#[test]
+fn reports_a_wiring_with_problems_without_drawing_the_rack() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let rack_file = dir.path().join("rack.kdl");
+    fs::write(&rack_file, r#"rack "lab" units=4 { device "a" model="dell/r630-sff8" u=1; }"#)
+        .expect("write the rack file");
+    fs::write(dir.path().join("wiring.kdl"), "wiring { net a:nic1 ghost:nic1; }")
+        .expect("write the wiring");
+    let output = rack(&rack_file, &[]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unknown device `ghost`"));
+}

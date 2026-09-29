@@ -35,6 +35,7 @@ The rack is described in `~/.config/rackctl/rack.kdl`, written in [KDL](https://
 ```kdl
 rack "homelab" units=36 {
   device "router"   model="ubiquiti/er6p"     u=36
+  device "patch"    model="generic/patchpanel-24" u=33
   device "switch"   model="cisco/sg350-28"    u=31
   device "server"   model="dell/r730-sff8"    u=28
   device "ups"      model="apc/sua2200rmi2u"  u=1
@@ -45,6 +46,16 @@ rack "homelab" units=36 {
 Each `model` refers to the device catalog in [`catalog/`](./catalog/), which describes the
 hardware: its height, depth, parts and faceplate. Models in `~/.config/rackctl/catalog/`
 add to the built-in ones or replace them.
+
+The cables go in `wiring.kdl` next to the rack file. Each line is one path, and a patch
+panel port names its side: `b` (back) or `f` (front), or both when a path passes through it.
+
+```kdl
+wiring {
+  power pdu:8 server:psu1
+  net   server:nic1 patch:b-f15 switch:10
+}
+```
 
 ## Building
 

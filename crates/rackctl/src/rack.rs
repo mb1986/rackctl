@@ -10,7 +10,7 @@ use rackctl_core::config;
 use rackctl_tui::ui::rack::front_view;
 use rackctl_tui::ui::text;
 
-use crate::paths::Locations;
+use crate::paths::{self, Locations};
 use crate::{CONFIG_ERROR, find_rack_file, open_catalog, write_reports};
 
 #[derive(Debug, Args)]
@@ -40,6 +40,10 @@ pub fn run(
             return Ok(ExitCode::from(CONFIG_ERROR));
         }
     };
+    if let Err(error) = config::load_wiring(&paths::wiring_file(&rack_file), &rack, &catalog) {
+        write_reports(&mut err, iter::once(&error))?;
+        return Ok(ExitCode::from(CONFIG_ERROR));
+    }
 
     let buf = front_view(&rack, &catalog);
     let mut out = anstream::stdout();

@@ -50,6 +50,7 @@ fn summarizes_a_valid_rack() {
     let expected = formatdoc! {r#"
         catalog  {models} models, all valid ({models} built-in, 0 user)
         rack     {rack_file}: ok
+        wiring   none (no {wiring_file})
 
         rack "lab", 12U
           devices  3: 1 server, 1 switch, 1 PDU
@@ -59,9 +60,47 @@ fn summarizes_a_valid_rack() {
           strips   pdu (left, front, U3-U12)
         "#,
         rack_file = rack_file.display(),
+        wiring_file = dir.path().join("wiring.kdl").display(),
     };
     assert_eq!(stdout(&output), expected);
     assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+}
+
+#[test]
+fn counts_the_cables_of_the_wiring() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let rack_file = dir.path().join("rack.kdl");
+    fs::write(
+        &rack_file,
+        r#"rack "lab" units=4 {
+            device "sw" model="cisco/sg350-28" u=4
+            device "patch" model="generic/patchpanel-24" u=3
+            device "srv" model="dell/r630-sff8" u=1
+            device "pdu" model="apc/ap7952" mount="left"
+        }"#,
+    )
+    .expect("write the rack file");
+    let wiring_file = dir.path().join("wiring.kdl");
+    fs::write(
+        &wiring_file,
+        "wiring {
+            power pdu:1 srv:psu1
+            net srv:nic1 patch:b-f1 sw:1
+        }",
+    )
+    .expect("write the wiring");
+
+    let output = check(&rack_file);
+    let line = format!("wiring   {}: ok, 3 cables (1 power, 2 net)", wiring_file.display());
+    assert!(stdout(&output).lines().any(|row| row == line), "{}", stdout(&output));
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+
+    fs::write(&wiring_file, "wiring { power pdu:25 srv:psu1; }").expect("write the wiring");
+    let output = check(&rack_file);
+    let line = format!("wiring   {}: 1 problem", wiring_file.display());
+    assert!(stdout(&output).lines().any(|row| row == line), "{}", stdout(&output));
+    assert!(stderr(&output).contains("`pdu:25` does not exist: `pdu` has outlets 1-24"));
+    assert_eq!(output.status.code(), Some(2));
 }
 
 #[test]

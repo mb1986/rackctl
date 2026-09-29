@@ -1,5 +1,5 @@
-//! `rackctl check`: loads the catalog and the rack file, reports every problem and
-//! summarizes the rack.
+//! `rackctl check`: loads the catalog, the rack file and the wiring, reports every problem
+//! and summarizes the rack.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
@@ -9,11 +9,13 @@ use std::process::ExitCode;
 
 use rackctl_core::catalog::{Catalog, Kind, Origin};
 use rackctl_core::config;
+use rackctl_core::kdl_reader::FileError;
 use rackctl_core::rack::{Placement, Rack};
+use rackctl_core::wiring::{Cabling, LinkKind};
 use textwrap::core::Word;
 use textwrap::{Options, WordSeparator, WordSplitter};
 
-use crate::paths::Locations;
+use crate::paths::{self, Locations};
 use crate::style::{ERROR, HEADING, LABEL, NOTE, OK};
 use crate::{CONFIG_ERROR, find_rack_file, open_catalog, write_reports};
 
@@ -38,16 +40,18 @@ pub fn run(config: Option<PathBuf>, locations: &Locations) -> io::Result<ExitCod
     write_catalog(&mut out, &catalog, invalid_models.len())?;
 
     let rack = config::load_rack(&rack_file, &catalog);
-    let status = match &rack {
-        Ok(_) => format!("{OK}ok{OK:#}"),
-        Err(error) => {
-            let count = plural(error.problems().len(), "problem", "problems");
-            format!("{ERROR}{count}{ERROR:#}")
-        }
-    };
-    row(&mut out, "", "rack", &format!("{}: {status}", locations.display(&rack_file)))?;
+    let rack_status = status(rack.as_ref().err());
+    row(&mut out, "", "rack", &format!("{}: {rack_status}", locations.display(&rack_file)))?;
+    // The wiring names the rack's devices, so it is checked only against a valid rack.
+    let wiring_file = paths::wiring_file(&rack_file);
+    let wiring = rack.as_ref().ok().map(|rack| config::load_wiring(&wiring_file, rack, &catalog));
+    if let Some(wiring) = &wiring {
+        write_wiring(&mut out, &locations.display(&wiring_file), wiring)?;
+    }
+    let wiring_error = wiring.as_ref().and_then(|wiring| wiring.as_ref().err());
     if let Ok(rack) = &rack
         && invalid_models.is_empty()
+        && wiring_error.is_none()
     {
         writeln!(out)?;
         write_summary(&mut out, rack, &catalog)?;
@@ -55,8 +59,49 @@ pub fn run(config: Option<PathBuf>, locations: &Locations) -> io::Result<ExitCod
     }
     out.flush()?;
 
-    write_reports(&mut err, rack.as_ref().err().into_iter().chain(invalid_models))?;
+    let failed = rack.as_ref().err().into_iter().chain(invalid_models).chain(wiring_error);
+    write_reports(&mut err, failed)?;
     Ok(ExitCode::from(CONFIG_ERROR))
+}
+
+/// Describes the result of loading a file: `ok`, or how many problems it has.
+fn status(error: Option<&FileError>) -> String {
+    error.map_or_else(
+        || format!("{OK}ok{OK:#}"),
+        |error| {
+            let count = plural(error.problems().len(), "problem", "problems");
+            format!("{ERROR}{count}{ERROR:#}")
+        },
+    )
+}
+
+/// Writes the wiring line: the cables of each type, no wiring file, or its problems.
+fn write_wiring(
+    out: &mut impl Write,
+    path: &str,
+    wiring: &Result<Option<Cabling>, FileError>,
+) -> io::Result<()> {
+    let value = match wiring {
+        Ok(None) => format!("{NOTE}none (no {path}){NOTE:#}"),
+        Ok(Some(cabling)) => {
+            let links = cabling.links();
+            let kinds: Vec<String> = [LinkKind::Power, LinkKind::Net, LinkKind::Mgmt]
+                .into_iter()
+                .map(|kind| (kind, links.iter().filter(|link| link.kind == kind).count()))
+                .filter(|&(_, count)| count > 0)
+                .map(|(kind, count)| format!("{count} {}", <&str>::from(kind)))
+                .collect();
+            let cables = plural(links.len(), "cable", "cables");
+            let kinds = if kinds.is_empty() {
+                String::new()
+            } else {
+                format!(" {NOTE}({}){NOTE:#}", kinds.join(", "))
+            };
+            format!("{path}: {}, {cables}{kinds}", status(None))
+        }
+        Err(error) => format!("{path}: {}", status(Some(error))),
+    };
+    row(out, "", "wiring", &value)
 }
 
 fn write_catalog(out: &mut impl Write, catalog: &Catalog, invalid: usize) -> io::Result<()> {

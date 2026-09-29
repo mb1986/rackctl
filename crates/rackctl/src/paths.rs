@@ -70,6 +70,11 @@ pub fn user_catalog(rack_file: &Path) -> PathBuf {
     rack_file.parent().unwrap_or_else(|| Path::new("")).join("catalog")
 }
 
+/// Returns the wiring file for a rack file: `wiring.kdl` next to it.
+pub fn wiring_file(rack_file: &Path) -> PathBuf {
+    rack_file.parent().unwrap_or_else(|| Path::new("")).join("wiring.kdl")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,5 +131,14 @@ mod tests {
             PathBuf::from("/srv/rack/catalog")
         );
         assert_eq!(user_catalog(Path::new("rack.kdl")), PathBuf::from("catalog"));
+    }
+
+    #[test]
+    fn finds_the_wiring_next_to_the_rack_file() {
+        assert_eq!(
+            wiring_file(Path::new("/srv/rack/rack.kdl")),
+            PathBuf::from("/srv/rack/wiring.kdl")
+        );
+        assert_eq!(wiring_file(Path::new("rack.kdl")), PathBuf::from("wiring.kdl"));
     }
 }

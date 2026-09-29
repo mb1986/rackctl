@@ -6,7 +6,8 @@ generated on 2026-09-27 by the Python prototypes (`face_preview.py` and `rack_pr
 
 - `faces/<model>.txt`: each catalog model's face, with the sample name `srv01`.
   `.numbers` adds `--numbers`, `.off` adds `--state off`, and `.strip` marks a strip face.
-- `rack/rack.txt`: the front view of `rack/rack.kdl` with `rack/wiring.kdl`.
+- `rack/rack.txt`: the front view of `rack/rack.kdl` with `rack/wiring.kdl`. The wiring was
+  rewritten on 2026-09-30 in the current syntax, with the same cables.
 - `.ansi` files hold the same drawings with their styles (colours, tints and the underline
   that separates devices), without `--plain`. View them with `cat`.
 
