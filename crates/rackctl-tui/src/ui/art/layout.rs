@@ -1,5 +1,7 @@
 //! The layout of a face at a given width.
 
+use std::iter;
+
 use rackctl_core::catalog::{Cell, Face, Part};
 
 /// A face laid out at a width, and for a strip, at a height.
@@ -16,26 +18,11 @@ impl FaceLayout {
     /// Lays out `face` at `width` columns, stretching its fills and cutting longer rows.
     #[must_use]
     pub fn new(face: &Face, width: usize) -> Self {
-        let is_fill = |cell: &Cell| matches!(cell, Cell::Element(index) if face.elements()[*index].part == Part::Fill);
         let columns: Vec<Vec<Option<usize>>> = face
             .cells()
             .map(|cells| {
-                let fills = cells.iter().filter(|cell| is_fill(cell)).count();
-                let spare = width.saturating_sub(cells.len() - fills);
-                let mut columns = Vec::with_capacity(width.max(cells.len()));
-                let mut fill = 0;
-                for (column, cell) in cells.iter().enumerate() {
-                    if is_fill(cell) {
-                        // The leftmost fills take the remainder.
-                        let extra = usize::from(fill < spare % fills);
-                        columns.extend(std::iter::repeat_n(None, spare / fills + extra));
-                        fill += 1;
-                    } else {
-                        columns.push(Some(column));
-                    }
-                }
-                columns.resize(width, None);
-                columns
+                let fills: Vec<bool> = cells.iter().map(|&cell| is_fill(face, cell)).collect();
+                stretch(&fills, width)
             })
             .collect();
         let rows = (0..columns.len()).map(Some).collect();
@@ -46,34 +33,16 @@ impl FaceLayout {
     /// spare rows, the first ones taking the remainder, and a taller face is cut.
     #[must_use]
     pub fn stretched(face: &Face, width: usize, height: usize) -> Self {
-        let mut layout = Self::new(face, width);
-        let is_fill = |cell: &Cell| matches!(cell, Cell::Element(index) if face.elements()[*index].part == Part::Fill);
         let blank = |cell: &Cell| *cell == Cell::Literal(' ');
         let fill_rows: Vec<bool> = face
             .cells()
             .map(|cells| {
                 let start = cells.iter().position(|cell| !blank(cell)).unwrap_or(cells.len());
                 let end = cells.iter().rposition(|cell| !blank(cell)).map_or(start, |end| end + 1);
-                start < end && cells[start..end].iter().all(is_fill)
+                start < end && cells[start..end].iter().all(|&cell| is_fill(face, cell))
             })
             .collect();
-        let fills = fill_rows.iter().filter(|&&fill| fill).count();
-        let spare = (height + fills).checked_sub(fill_rows.len()).filter(|_| fills > 0);
-        if let Some(spare) = spare {
-            layout.rows.clear();
-            let mut fill = 0;
-            for (row, &is_fill) in fill_rows.iter().enumerate() {
-                if is_fill {
-                    let extra = usize::from(fill < spare % fills);
-                    layout.rows.extend(std::iter::repeat_n(None, spare / fills + extra));
-                    fill += 1;
-                } else {
-                    layout.rows.push(Some(row));
-                }
-            }
-        }
-        layout.rows.resize(height, None);
-        layout
+        Self { rows: stretch(&fill_rows, height), ..Self::new(face, width) }
     }
 
     /// Returns the width the face is laid out at.
@@ -93,6 +62,32 @@ impl FaceLayout {
     pub fn rows(&self) -> impl Iterator<Item = Option<(usize, &[Option<usize>])>> {
         self.rows.iter().map(|row| row.map(|row| (row, self.columns[row].as_slice())))
     }
+}
+
+/// Returns whether `cell` is part of a fill.
+fn is_fill(face: &Face, cell: Cell) -> bool {
+    matches!(cell, Cell::Element(index) if face.elements()[index].part == Part::Fill)
+}
+
+/// Lays out a line of items at `length` positions and returns the item each position shows,
+/// `None` for a blank. Fills share the spare positions, the first ones taking the remainder,
+/// and a longer line is cut.
+fn stretch(fills: &[bool], length: usize) -> Vec<Option<usize>> {
+    let count = fills.iter().filter(|&&fill| fill).count();
+    let spare = length.saturating_sub(fills.len() - count);
+    let mut line = Vec::with_capacity(length.max(fills.len()));
+    let mut fill = 0;
+    for (at, &is_fill) in fills.iter().enumerate() {
+        if is_fill {
+            let extra = usize::from(fill < spare % count);
+            line.extend(iter::repeat_n(None, spare / count + extra));
+            fill += 1;
+        } else {
+            line.push(Some(at));
+        }
+    }
+    line.resize(length, None);
+    line
 }
 
 #[cfg(test)]
@@ -177,8 +172,10 @@ mod tests {
     }
 
     #[test]
-    fn pads_and_cuts_a_strip_without_fill_rows() {
+    fn pads_a_strip_without_fill_rows_and_cuts_one_too_tall() {
         assert_eq!(stretched(&["a", "b", "c"], 4), ["a", "b", "c", " "]);
         assert_eq!(stretched(&["a", "b", "c"], 2), ["a", "b"]);
+        // Fill rows get nothing before the other rows are cut.
+        assert_eq!(stretched(&["p", "~", "o", "o", "o", "~", "t"], 4), ["p", "o", "o", "o"]);
     }
 }
