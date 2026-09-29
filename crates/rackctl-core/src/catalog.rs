@@ -21,7 +21,7 @@ pub use legend::{
     Align, Direction, Legend, LegendEntry, Media, Numbering, Order, Part, PartKind, State,
 };
 pub use model::{Components, Depth, Ears, Kind, Model, Mount};
-pub use numbering::{Numbers, Slot};
+pub use numbering::{NumberRun, Numbers, Slot};
 
 use crate::kdl_reader::{FileError, Problem};
 use crate::{IDENTIFIER_RULE, is_identifier};

@@ -166,6 +166,9 @@ pub enum State {
 }
 
 impl Part {
+    /// The parts that cables connect to, named in the wiring as in `srv01:psu1`.
+    pub const ENDPOINTS: [Self; 5] = [Self::Psu, Self::Nic, Self::Mgmt, Self::Port, Self::Outlet];
+
     /// Returns the group of parts this one belongs to.
     #[must_use]
     pub const fn kind(self) -> PartKind {
@@ -642,11 +645,16 @@ fn parse_numbers(text: &str) -> Result<Vec<u16>, String> {
 /// Parses a group name, such as `XG`. It uses only ASCII letters, so that a port written
 /// `XG1` cannot be read another way.
 fn parse_group(text: &str) -> Result<String, String> {
-    if !text.is_empty() && text.chars().all(|c| c.is_ascii_alphabetic()) {
-        Ok(text.to_owned())
-    } else {
-        Err(format!("a group name uses only ASCII letters, for example `XG`, found `{text}`"))
+    if text.is_empty() || !text.chars().all(|c| c.is_ascii_alphabetic()) {
+        return Err(format!(
+            "a group name uses only ASCII letters, for example `XG`, found `{text}`"
+        ));
     }
+    let part = Part::ENDPOINTS.map(<&str>::from).into_iter().find(|p| p.eq_ignore_ascii_case(text));
+    if let Some(part) = part {
+        return Err(format!("`{text}` cannot name a group: the wiring uses `{part}`"));
+    }
+    Ok(text.to_owned())
 }
 
 #[cfg(test)]
@@ -819,7 +827,8 @@ mod tests {
                    n bay numbers="65536"
                    o outlet type="" rating="1\n0A"
                    q text="A\tB"
-                   r bay first=0 numbers="1""#
+                   r bay first=0 numbers="1"
+                   s port group="Psu""#
             ),
             [
                 "`order` must be `right`, `left`, `down` or `up`, optionally followed by a \
@@ -843,6 +852,7 @@ mod tests {
                 "`rating` must not contain control characters",
                 "a text must not contain control characters",
                 "`first` has no effect next to `numbers`",
+                "`Psu` cannot name a group: the wiring uses `psu`",
             ]
         );
     }

@@ -4,7 +4,7 @@ use super::face::{Face, Faces};
 use super::legend::{Direction, Legend, LegendEntry, Media, Part, PartKind};
 use miette::SourceSpan;
 
-use super::model::Components;
+use super::model::{Components, Model};
 use crate::kdl_reader::{Problem, Spanned};
 use crate::plural;
 
@@ -117,6 +117,70 @@ impl Numbers {
         let segment = self.segments.iter().find(|segment| segment.group.as_deref() == group)?;
         let at = usize::from(number.checked_sub(segment.base)?);
         (at < segment.size).then(|| self.slots[segment.offset + at])
+    }
+
+    /// Returns the numbers of each group, in table order.
+    pub fn runs(&self) -> impl Iterator<Item = NumberRun<'_>> {
+        self.segments.iter().map(|segment| NumberRun {
+            group: segment.group.as_deref(),
+            first: segment.base,
+            count: u16::try_from(segment.size).unwrap_or(u16::MAX),
+        })
+    }
+}
+
+/// Consecutive numbers of one group, such as ports XG1 to XG4.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NumberRun<'a> {
+    pub group: Option<&'a str>,
+    pub first: u16,
+    pub count: u16,
+}
+
+impl NumberRun<'_> {
+    /// Returns the place of `number` in the run, counted from 0.
+    fn place(self, group: Option<&str>, number: u16) -> Option<u16> {
+        let place = number.checked_sub(self.first)?;
+        (self.group == group && place < self.count).then_some(place)
+    }
+}
+
+impl Model {
+    /// Returns the numbers of the endpoints of `part`, such as its ports: the number table of
+    /// a face that shows the part, or else 1 to the declared count.
+    pub fn endpoint_runs(&self, part: Part) -> impl Iterator<Item = NumberRun<'_>> {
+        let table = self.faces.iter().find_map(|face| face.numbers(part));
+        let count = self.components.count(part);
+        let declared =
+            (table.is_none() && count > 0).then_some(NumberRun { group: None, first: 1, count });
+        table.into_iter().flat_map(Numbers::runs).chain(declared)
+    }
+
+    /// Returns the place of an endpoint among those of `part`, counted from 0 across its
+    /// groups, or `None` if the model has no such endpoint.
+    #[must_use]
+    pub fn endpoint_index(&self, part: Part, group: Option<&str>, number: u16) -> Option<u16> {
+        let mut offset = 0;
+        for run in self.endpoint_runs(part) {
+            if let Some(place) = run.place(group, number) {
+                return Some(offset + place);
+            }
+            offset += run.count;
+        }
+        None
+    }
+
+    /// Returns the group and number of the endpoint of `part` at `index`.
+    #[must_use]
+    pub fn endpoint_name(&self, part: Part, index: u16) -> Option<(Option<&str>, u16)> {
+        let mut rest = index;
+        for run in self.endpoint_runs(part) {
+            if rest < run.count {
+                return Some((run.group, run.first + rest));
+            }
+            rest -= run.count;
+        }
+        None
     }
 }
 
@@ -344,7 +408,7 @@ fn check_numbers(
     let slots =
         |numbers: &[(u16, &LegendEntry, usize)]| numbers.chunk_by(|a, b| a.0 == b.0).count();
     let total: usize = sorted.iter().map(|numbers| slots(numbers)).sum();
-    let declared = declared(components, numbered.part);
+    let declared = components.count(numbered.part);
     if total != usize::from(declared) {
         let (name, node) = names(numbered.part);
         let count = if declared == 0 { "none".to_owned() } else { declared.to_string() };
@@ -469,19 +533,6 @@ fn report_gaps(
     }
     problems.push(problem);
     true
-}
-
-/// Returns the declared count of a numbered part, such as `bays 8`; zero when absent.
-const fn declared(components: &Components, part: Part) -> u16 {
-    match part {
-        Part::Bay => components.bays,
-        Part::Psu => components.psus,
-        Part::Nic => components.nics,
-        Part::Mgmt => components.mgmt,
-        Part::Port => components.ports,
-        Part::Outlet => components.outlets,
-        _ => 0,
-    }
 }
 
 /// Returns the name of a numbered part in messages, and the node declaring its count.
@@ -788,6 +839,45 @@ mod tests {
             legend,
             &[("the normal face shows 9 ports, but the model declares 11", picture)],
         );
+    }
+
+    #[test]
+    fn places_endpoints_across_groups() {
+        // Ports 1 to 7, then XG1 and XG2.
+        let rows = ["nn g s sxc", "nn g s x"];
+        let legend = r#"n port
+            g port numbers="5-6" order="down"
+            s port media="sfp" numbers="5-7" order="down"
+            x port group="XG""#;
+        let model = Model::parse("x/y", &server(rows, "ports 9", legend)).expect("valid model");
+        let index = |group, number| model.endpoint_index(Part::Port, group, number);
+        assert_eq!(
+            [index(None, 1), index(None, 7), index(Some("XG"), 1)],
+            [Some(0), Some(6), Some(7)]
+        );
+        assert_eq!([index(None, 0), index(None, 8), index(Some("XG"), 3)], [None, None, None]);
+        assert_eq!(model.endpoint_name(Part::Port, 8), Some((Some("XG"), 2)));
+        assert_eq!(model.endpoint_name(Part::Port, 9), None);
+    }
+
+    #[test]
+    fn places_endpoints_numbered_from_first() {
+        let model = Model::parse("x/y", &server(["n n nc", "n n n"], "ports 6", "n port first=0"))
+            .expect("valid model");
+        let index = |number| model.endpoint_index(Part::Port, None, number);
+        assert_eq!([index(0), index(5), index(6)], [Some(0), Some(5), None]);
+        assert_eq!(model.endpoint_name(Part::Port, 0), Some((None, 0)));
+    }
+
+    #[test]
+    fn places_endpoints_the_face_does_not_show_from_1() {
+        let model =
+            Model::parse("x/y", &server(["b bc", "~"], "bays 2; psus 2", "b bay")).expect("valid");
+        let index = |group, number| model.endpoint_index(Part::Psu, group, number);
+        assert_eq!([index(None, 1), index(None, 2)], [Some(0), Some(1)]);
+        assert_eq!([index(None, 0), index(None, 3), index(Some("XG"), 1)], [None, None, None]);
+        assert_eq!(model.endpoint_name(Part::Psu, 1), Some((None, 2)));
+        assert_eq!(model.endpoint_runs(Part::Nic).count(), 0);
     }
 
     #[test]

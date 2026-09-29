@@ -6,7 +6,7 @@ use kdl::{KdlDocument, KdlNode};
 use strum::{EnumString, IntoStaticStr, VariantNames};
 
 use super::face::{Faces, check_faces, check_glyphs, check_unused_keys, cut_faces, read_face};
-use super::legend::{Legend, read_legend};
+use super::legend::{Legend, Part, read_legend};
 use super::numbering::number_faces;
 use crate::kdl_reader::{self, NodeReader, Problem};
 
@@ -131,6 +131,22 @@ pub struct Components {
     pub outlets: u16,
 }
 
+impl Components {
+    /// Returns the declared count of a numbered part, such as `bays 8`; zero for other parts.
+    #[must_use]
+    pub const fn count(&self, part: Part) -> u16 {
+        match part {
+            Part::Bay => self.bays,
+            Part::Psu => self.psus,
+            Part::Nic => self.nics,
+            Part::Mgmt => self.mgmt,
+            Part::Port => self.ports,
+            Part::Outlet => self.outlets,
+            _ => 0,
+        }
+    }
+}
+
 /// The nodes a model may contain, used to suggest corrections for misspelled ones.
 const NODES: &[&str] = &[
     "name",
@@ -250,6 +266,7 @@ fn read_model(id: &str, node: &KdlNode, problems: &mut Vec<Problem>) -> Option<M
                 .with_help("add a `face` or remove the `legend`"),
         );
     }
+    check_patch_panel(kind, &legend, problems);
     // A node that is present but invalid has already been reported.
     for key in ["name", "kind"] {
         if !seen.contains(&key) {
@@ -280,6 +297,19 @@ fn read_model(id: &str, node: &KdlNode, problems: &mut Vec<Problem>) -> Option<M
         faces,
         legend,
     })
+}
+
+/// Reports port groups on a patch panel, whose ports the wiring names by side instead.
+fn check_patch_panel(kind: Option<Kind>, legend: &Legend, problems: &mut Vec<Problem>) {
+    if kind != Some(Kind::PatchPanel) {
+        return;
+    }
+    for entry in legend.entries().filter(|entry| entry.numbering.group.is_some()) {
+        problems.push(
+            Problem::new("a patch panel's ports have no groups", entry.span)
+                .with_help("the wiring names a patch port by its side, such as `b14` or `f14`"),
+        );
+    }
 }
 
 /// Reads a node holding a single value, such as `height 2`, and reports anything else
@@ -434,6 +464,17 @@ mod tests {
             messages(r#"model { name "X"; kind "server"; legend { p power } }"#),
             ["a `legend` needs a `face` to describe"]
         );
+    }
+
+    #[test]
+    fn reports_port_groups_on_a_patch_panel() {
+        let text = r##"model { name "X"; kind "patch-panel"; ports 2
+            face #"""
+            n x
+            ~
+            """#
+            legend { n port; x port group="XG"; ~ fill } }"##;
+        assert_eq!(messages(text), ["a patch panel's ports have no groups"]);
     }
 
     #[test]
