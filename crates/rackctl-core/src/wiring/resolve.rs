@@ -4,8 +4,9 @@ use std::collections::HashMap;
 
 use miette::SourceSpan;
 
-use super::cabling::{Cabling, End, Link, SocketId};
-use super::{CablePath, EndpointName, EndpointRef, LinkKind, PatchSide, Wiring};
+use super::cabling::{Cabling, DeviceEndpoints, End, Link, SocketId};
+use super::endpoint::main_part;
+use super::{CablePath, EndpointName, EndpointRef, LinkKind, PatchSide, Wiring, parse_endpoint};
 use crate::catalog::{Catalog, Kind, Model, Part, part_names};
 use crate::kdl_reader::Problem;
 use crate::rack::Rack;
@@ -20,11 +21,37 @@ struct Found {
     sides: Option<(PatchSide, PatchSide)>,
 }
 
+/// Where an endpoint is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Place {
+    /// First or last in a path.
+    End,
+    /// Between two others in a path.
+    Middle,
+    /// On its own, as in `rackctl trace`: a patch-panel port may leave out its side.
+    Alone,
+}
+
 /// The rack's devices and their models, for looking up endpoints.
 struct Devices<'a> {
     rack: &'a Rack,
     models: Vec<Option<&'a Model>>,
     ids: HashMap<&'a str, usize>,
+}
+
+impl<'a> Devices<'a> {
+    fn new(rack: &'a Rack, catalog: &'a Catalog) -> Self {
+        Self {
+            rack,
+            models: rack.devices.iter().map(|device| catalog.model(&device.model).ok()).collect(),
+            ids: rack
+                .devices
+                .iter()
+                .enumerate()
+                .map(|(index, device)| (device.id.as_str(), index))
+                .collect(),
+        }
+    }
 }
 
 impl Wiring {
@@ -36,22 +63,16 @@ impl Wiring {
     ///
     /// Returns every problem found, located in the wiring file.
     pub fn resolve(&self, rack: &Rack, catalog: &Catalog) -> Result<Cabling, Vec<Problem>> {
-        let devices = Devices {
-            rack,
-            models: rack.devices.iter().map(|device| catalog.model(&device.model).ok()).collect(),
-            ids: rack
-                .devices
-                .iter()
-                .enumerate()
-                .map(|(index, device)| (device.id.as_str(), index))
-                .collect(),
-        };
-        let counts: Vec<[u16; Part::ENDPOINTS.len()]> = devices
+        let devices = Devices::new(rack, catalog);
+        let endpoints: Vec<DeviceEndpoints> = devices
             .models
             .iter()
-            .map(|model| Part::ENDPOINTS.map(|part| model.map_or(0, |m| m.components.count(part))))
+            .map(|model| DeviceEndpoints {
+                counts: Part::ENDPOINTS.map(|part| model.map_or(0, |m| m.components.count(part))),
+                patch_panel: model.is_some_and(|model| model.kind == Kind::PatchPanel),
+            })
             .collect();
-        let mut cabling = Cabling::new(&counts);
+        let mut cabling = Cabling::new(&endpoints);
         // Where each socket, or each side of a patch port, is first used, by `End::place`.
         let mut first_uses: Vec<Option<SourceSpan>> = vec![None; cabling.places()];
         let mut problems = Vec::new();
@@ -60,7 +81,8 @@ impl Wiring {
             let last = path.endpoints.len().saturating_sub(1);
             let mut found = Vec::new();
             for (at, end) in path.endpoints.iter().enumerate() {
-                match devices.find(end, at == 0 || at == last, &cabling) {
+                let place = if at == 0 || at == last { Place::End } else { Place::Middle };
+                match devices.find(end, place, &cabling) {
                     Ok(end) => found.push(end),
                     Err(problem) => problems.push(problem),
                 }
@@ -96,9 +118,24 @@ impl Wiring {
     }
 }
 
+impl Cabling {
+    /// Looks up an endpoint written as in the wiring, such as `srv01:psu1`, in `rack`, whose
+    /// models come from `catalog`. A patch-panel port may leave out its side.
+    ///
+    /// # Errors
+    ///
+    /// Returns why `text` is not an endpoint of the rack.
+    pub fn find(&self, text: &str, rack: &Rack, catalog: &Catalog) -> Result<SocketId, Problem> {
+        let span = SourceSpan::from(0..text.len());
+        let (device, name) = parse_endpoint(text).map_err(|message| Problem::new(message, span))?;
+        let end = EndpointRef { device: device.to_owned(), name, span };
+        Ok(Devices::new(rack, catalog).find(&end, Place::Alone, self)?.socket)
+    }
+}
+
 impl Devices<'_> {
-    /// Looks up an endpoint; `at_end` is whether it is the first or last of its path.
-    fn find(&self, end: &EndpointRef, at_end: bool, cabling: &Cabling) -> Result<Found, Problem> {
+    /// Looks up an endpoint written at `place`.
+    fn find(&self, end: &EndpointRef, place: Place, cabling: &Cabling) -> Result<Found, Problem> {
         // The endpoint as written, for messages only.
         let written = || format!("{}:{}", end.device, end.name);
         let problem = |message: String| Problem::new(message, end.span);
@@ -113,11 +150,11 @@ impl Devices<'_> {
                 .with_label("see the problems reported for its file"));
         };
         let kind: &str = model.kind.into();
-        if !at_end && model.kind != Kind::PatchPanel {
+        if place == Place::Middle && model.kind != Kind::PatchPanel {
             return Err(problem("only a patch-panel port can sit in the middle of a path".into())
                 .with_label(format!("`{id}` is a {kind}")));
         }
-        let wanted = wanted(&end.name, model.kind, at_end).map_err(|mistake| {
+        let wanted = wanted(&end.name, model.kind, place).map_err(|mistake| {
             let problem = problem(mistake.message(&written(), id, kind));
             if matches!(mistake, Mistake::NoMainList) {
                 problem.with_help(format!("name the endpoint, such as `{id}:nic1` or `{id}:psu1`"))
@@ -198,20 +235,25 @@ impl Mistake {
     }
 }
 
-/// Reads what `name` asks for on a device of `kind`; `at_end` is whether the endpoint is the
-/// first or last of its path.
-fn wanted(name: &EndpointName, kind: Kind, at_end: bool) -> Result<Wanted<'_>, Mistake> {
+/// Reads what `name`, written at `place`, asks for on a device of `kind`.
+fn wanted(name: &EndpointName, kind: Kind, place: Place) -> Result<Wanted<'_>, Mistake> {
     let wanted = |part, group, number, sides| Wanted { part, group, number, sides };
     if kind == Kind::PatchPanel {
         return match name {
             EndpointName::Through { from, number } => {
                 Ok(wanted(Part::Port, None, Some(*number), Some((*from, from.opposite()))))
             }
+            EndpointName::Main(number) if place == Place::Alone => {
+                Ok(wanted(Part::Port, None, Some(*number), None))
+            }
             EndpointName::Main(_) => Err(Mistake::NoSide),
             EndpointName::Named { word, number } => match PatchSide::parse(word) {
-                Some(_) if !at_end => Err(Mistake::OneSide),
+                Some(_) if place == Place::Middle => Err(Mistake::OneSide),
                 Some(side) => Ok(wanted(Part::Port, None, *number, Some((side, side)))),
                 None => match endpoint_part(word) {
+                    Some(Part::Port) if place == Place::Alone => {
+                        Ok(wanted(Part::Port, None, *number, None))
+                    }
                     Some(Part::Port) => Err(Mistake::NoSide),
                     Some(part) => Ok(wanted(part, None, *number, None)),
                     None => Err(Mistake::NotASide(word.clone())),
@@ -279,15 +321,6 @@ fn already_connected(end: End, written: &EndpointRef, first: SourceSpan) -> Prob
         .with_label_at(first, "first connected here")
 }
 
-/// Returns the part a bare number names on a device of `kind`, such as the outlets of a PDU.
-const fn main_part(kind: Kind) -> Option<Part> {
-    match kind {
-        Kind::Pdu | Kind::Ups => Some(Part::Outlet),
-        Kind::Switch | Kind::Router | Kind::PatchPanel => Some(Part::Port),
-        _ => None,
-    }
-}
-
 /// Returns the endpoint part `word` names, such as `psu`.
 fn endpoint_part(word: &str) -> Option<Part> {
     Part::ENDPOINTS.into_iter().find(|&part| <&str>::from(part) == word)
@@ -324,7 +357,7 @@ fn with_article(noun: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use indoc::indoc;
     use miette::Diagnostic;
 
@@ -342,7 +375,7 @@ mod tests {
         }"#};
 
     /// Resolves the wiring statements `paths` against [`RACK`] and the built-in catalog.
-    fn resolve(paths: &str) -> (String, Rack, Result<Cabling, Vec<Problem>>) {
+    pub(in crate::wiring) fn resolve(paths: &str) -> (String, Rack, Result<Cabling, Vec<Problem>>) {
         let catalog = Catalog::builtin();
         let rack = Rack::parse(RACK).expect("valid rack");
         assert!(rack.check(&catalog).is_empty());

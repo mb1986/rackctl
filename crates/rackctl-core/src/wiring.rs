@@ -3,13 +3,14 @@
 mod cabling;
 mod endpoint;
 mod resolve;
+mod trace;
 
 use kdl::{KdlDocument, KdlNode};
 use miette::SourceSpan;
 use strum::{EnumString, IntoStaticStr, VariantNames};
 
 pub use cabling::{Cabling, End, Endpoint, Link, SocketId};
-pub use endpoint::{EndpointName, EndpointRef, PatchSide, parse_endpoint};
+pub use endpoint::{EndpointName, EndpointRef, PatchSide, endpoint_name, parse_endpoint};
 
 use crate::kdl_reader::{self, NodeReader, Problem, span_of};
 

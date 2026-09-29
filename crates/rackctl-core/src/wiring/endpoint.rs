@@ -4,6 +4,10 @@ use std::fmt;
 
 use miette::SourceSpan;
 
+use super::Endpoint;
+use crate::catalog::{Catalog, Kind, Part};
+use crate::rack::Rack;
+
 /// An endpoint as written: a device id and the name of one of its endpoints.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EndpointRef {
@@ -80,6 +84,36 @@ impl fmt::Display for EndpointName {
                 write!(f, "{}-{}{number}", from.short(), from.opposite().short())
             }
         }
+    }
+}
+
+/// Writes an endpoint of `rack` the short way: `pdu:8`, `sw:XG1`, `patch-32:15`,
+/// `srv01:psu1`, or `srv01:mgmt` when the device has one management port.
+#[must_use]
+pub fn endpoint_name(endpoint: Endpoint, rack: &Rack, catalog: &Catalog) -> String {
+    let device = &rack.devices[endpoint.device];
+    let part: &str = endpoint.part.into();
+    let fallback = endpoint.index.saturating_add(1);
+    let Ok(model) = catalog.model(&device.model) else {
+        return format!("{}:{part}{fallback}", device.id);
+    };
+    let (group, number) =
+        model.endpoint_name(endpoint.part, endpoint.index).unwrap_or((None, fallback));
+    if main_part(model.kind) == Some(endpoint.part) {
+        format!("{}:{}{number}", device.id, group.unwrap_or(""))
+    } else if model.components.count(endpoint.part) == 1 {
+        format!("{}:{part}", device.id)
+    } else {
+        format!("{}:{part}{number}", device.id)
+    }
+}
+
+/// Returns the part a bare number names on a device of `kind`, such as the outlets of a PDU.
+pub(super) const fn main_part(kind: Kind) -> Option<Part> {
+    match kind {
+        Kind::Pdu | Kind::Ups => Some(Part::Outlet),
+        Kind::Switch | Kind::Router | Kind::PatchPanel => Some(Part::Port),
+        _ => None,
     }
 }
 

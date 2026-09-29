@@ -56,6 +56,15 @@ pub struct Cabling {
     /// Where the sockets of each device's parts start, by device and then part in
     /// [`Part::ENDPOINTS`] order, followed by the end of the table.
     starts: Vec<u32>,
+    /// Whether each device is a patch panel, whose ports join their back and front.
+    patch_panels: Vec<bool>,
+}
+
+/// A device's endpoints, for building [`Cabling`].
+pub(super) struct DeviceEndpoints {
+    /// How many of each part, in [`Part::ENDPOINTS`] order.
+    pub(super) counts: [u16; Part::ENDPOINTS.len()],
+    pub(super) patch_panel: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,13 +76,12 @@ struct Socket {
 }
 
 impl Cabling {
-    /// Returns cabling without cables for devices with `counts` endpoints of each part, in
-    /// [`Part::ENDPOINTS`] order.
-    pub(super) fn new(counts: &[[u16; Part::ENDPOINTS.len()]]) -> Self {
-        let mut starts = Vec::with_capacity(counts.len() * Part::ENDPOINTS.len() + 1);
+    /// Returns cabling without cables for `devices`.
+    pub(super) fn new(devices: &[DeviceEndpoints]) -> Self {
+        let mut starts = Vec::with_capacity(devices.len() * Part::ENDPOINTS.len() + 1);
         let mut sockets = Vec::new();
-        for (device, counts) in counts.iter().enumerate() {
-            for (&part, &count) in Part::ENDPOINTS.iter().zip(counts) {
+        for (device, endpoints) in devices.iter().enumerate() {
+            for (&part, &count) in Part::ENDPOINTS.iter().zip(&endpoints.counts) {
                 starts.push(position(sockets.len()));
                 sockets.extend((0..count).map(|index| Socket {
                     endpoint: Endpoint { device, part, index },
@@ -82,7 +90,8 @@ impl Cabling {
             }
         }
         starts.push(position(sockets.len()));
-        Self { links: Vec::new(), sockets, starts }
+        let patch_panels = devices.iter().map(|device| device.patch_panel).collect();
+        Self { links: Vec::new(), sockets, starts, patch_panels }
     }
 
     /// Returns the number of places for an [`End`]: two slots for each socket.
@@ -112,11 +121,35 @@ impl Cabling {
         self.sockets[socket.at()].endpoint
     }
 
+    /// Returns the sockets of a device's part, such as its PSUs.
+    pub fn sockets(&self, device: usize, part: Part) -> impl Iterator<Item = SocketId> {
+        let part = Part::ENDPOINTS.iter().position(|&endpoint| endpoint == part);
+        let at = part.map(|part| device * Part::ENDPOINTS.len() + part);
+        let start = at.and_then(|at| self.starts.get(at)).copied().unwrap_or(0);
+        let end = at.and_then(|at| self.starts.get(at + 1)).copied().unwrap_or(0);
+        (start..end).map(SocketId)
+    }
+
+    /// Returns whether a socket is a patch-panel port, which joins its back and front.
+    #[must_use]
+    pub fn is_patch_port(&self, socket: SocketId) -> bool {
+        let endpoint = self.endpoint(socket);
+        endpoint.part == Part::Port && self.patch_panels[endpoint.device]
+    }
+
     /// Returns the cable plugged in at `end`, if there is one.
     #[must_use]
     pub fn link_at(&self, end: End) -> Option<&Link> {
         let link = self.sockets[end.socket.at()].links[slot(end.side)]?;
         self.links.get(link as usize)
+    }
+
+    /// Returns the other end of the cable plugged in at `end`, such as the PSU an outlet
+    /// feeds.
+    #[must_use]
+    pub fn connected(&self, end: End) -> Option<End> {
+        let [first, second] = self.link_at(end)?.ends;
+        Some(if first == end { second } else { first })
     }
 
     /// Adds a cable whose ends are free.
