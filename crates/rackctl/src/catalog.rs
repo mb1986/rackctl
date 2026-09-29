@@ -6,20 +6,12 @@ use std::process::ExitCode;
 
 use clap::{Args, ValueEnum};
 use rackctl_core::catalog::{Catalog, ModelError};
-use rackctl_tui::ui::art::{FaceLayout, FaceView, Panel, Sample, sample_looks};
-use rackctl_tui::ui::slice::Slice;
+use rackctl_tui::ui::art::Sample;
+use rackctl_tui::ui::preview::preview;
 use rackctl_tui::ui::text;
-use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
-use ratatui::widgets::Widget;
 
 use crate::CONFIG_ERROR;
 use crate::paths::{self, Locations};
-
-/// The width of a face between its ears.
-const FACE_WIDTH: usize = 48;
-/// The lowest unit of the drawn device.
-const UNIT: u16 = 10;
 
 #[derive(Debug, Args)]
 pub struct ShowArgs {
@@ -92,22 +84,7 @@ fn draw(args: &ShowArgs, config: Option<PathBuf>, locations: &Locations) -> io::
         SampleState::Normal => Sample::Normal,
         SampleState::Off => Sample::Off,
     };
-    let looks = sample_looks(model, face, sample);
-    let look = |index: usize| looks[index];
-    let layout = FaceLayout::new(face, FACE_WIDTH);
-    let view = FaceView {
-        model,
-        face,
-        layout: &layout,
-        name: &args.name,
-        amps: "4.1A",
-        look: &look,
-        numbers: args.numbers,
-    };
-    let slice = Slice { panel: Panel { face: view }, unit: UNIT, rows_per_unit: 2 };
-    let mut buf = Buffer::empty(Rect::new(0, 0, slice.width(), slice.height()));
-    slice.render(buf.area, &mut buf);
-
+    let buf = preview(model, face, sample, args.numbers, &args.name);
     let mut out = anstream::stdout();
     let lines = if args.plain { text::plain(&buf) } else { text::ansi(&buf) };
     for line in lines {

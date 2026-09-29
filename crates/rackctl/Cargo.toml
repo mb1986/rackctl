@@ -19,7 +19,6 @@ anstream.workspace = true
 anstyle.workspace = true
 clap.workspace = true
 miette = { workspace = true, features = ["fancy-no-backtrace"] }
-ratatui.workspace = true
 textwrap.workspace = true
 
 [dev-dependencies]

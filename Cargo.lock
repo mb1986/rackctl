@@ -1097,7 +1097,6 @@ dependencies = [
  "miette",
  "rackctl-core",
  "rackctl-tui",
- "ratatui",
  "tempfile",
  "textwrap",
 ]
