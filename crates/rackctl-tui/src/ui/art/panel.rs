@@ -121,14 +121,14 @@ mod tests {
         let model = Model::parse("x/y", &text).expect("valid model");
         let face = model.faces.normal.as_ref().expect("normal face");
         let layout = FaceLayout::new(face, 4);
-        let look = |_| Look { state: State::On, tone: Tone::Good };
+        let looks = vec![Look { state: State::On, tone: Tone::Good }; face.elements().len()];
         let view = FaceView {
             model: &model,
             face,
             layout: &layout,
             name: "",
             amps: "",
-            look: &look,
+            looks: &looks,
             numbers: false,
         };
         let panel = Panel { face: view };

@@ -31,8 +31,8 @@ pub struct FaceView<'a> {
     pub name: &'a str,
     /// The total current, for `amps` fields.
     pub amps: &'a str,
-    /// The look of each LED and numbered element, by position in [`Face::elements`].
-    pub look: &'a dyn Fn(usize) -> Look,
+    /// The look of each element, by position in [`Face::elements`].
+    pub looks: &'a [Look],
     /// Whether numbered elements show their numbers instead of their glyphs.
     pub numbers: bool,
 }
@@ -74,7 +74,7 @@ impl FaceView<'_> {
         let cells = element.width * element.height;
         match element.part.kind() {
             PartKind::Led | PartKind::List => {
-                let look = (self.look)(index);
+                let look = self.looks[index];
                 let style = BASE.fg(look.tone.color());
                 if self.numbers && element.part.kind() == PartKind::List {
                     let number =
@@ -178,14 +178,14 @@ mod tests {
     fn paint(model: &Model, width: u16, numbers: bool, look: impl Fn(&Element) -> Look) -> Buffer {
         let face = model.faces.normal.as_ref().expect("normal face");
         let layout = FaceLayout::new(face, usize::from(width));
-        let look = |index: usize| look(&face.elements()[index]);
+        let looks: Vec<Look> = face.elements().iter().map(look).collect();
         let view = FaceView {
             model,
             face,
             layout: &layout,
             name: "srv01",
             amps: "4.1A",
-            look: &look,
+            looks: &looks,
             numbers,
         };
         let height = u16::try_from(face.rows().count()).expect("few rows");

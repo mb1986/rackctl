@@ -22,8 +22,8 @@ const STRIP_UNITS: u16 = 36;
 #[must_use]
 pub fn preview(model: &Model, face: &Face, sample: Sample, numbers: bool, name: &str) -> Buffer {
     let looks = sample_looks(model, face, sample);
-    let look = |index: usize| looks[index];
-    let view = |layout| FaceView { model, face, layout, name, amps: "4.1A", look: &look, numbers };
+    let view =
+        |layout| FaceView { model, face, layout, name, amps: "4.1A", looks: &looks, numbers };
     if face.kind != FaceKind::Strip {
         let layout = FaceLayout::new(face, FACE_WIDTH);
         let slice = Slice { panel: Panel { face: view(&layout) }, unit: UNIT, rows_per_unit: 2 };
