@@ -15,6 +15,9 @@ pub enum Sample {
     Off,
 }
 
+/// The total current of a sample device, for `amps` fields.
+pub const SAMPLE_AMPS: &str = "4.1A";
+
 /// Returns the look of each element of a sample device, by position in [`Face::elements`].
 #[must_use]
 pub fn sample_looks(model: &Model, face: &Face, sample: Sample) -> Vec<Look> {

@@ -6,7 +6,7 @@ use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::widgets::Widget;
 
-use crate::ui::art::{FaceLayout, FaceView, Panel, Sample, sample_looks};
+use crate::ui::art::{FaceLayout, FaceView, Panel, SAMPLE_AMPS, Sample, sample_looks};
 use crate::ui::slice::Slice;
 use crate::ui::theme::RACK;
 
@@ -23,7 +23,7 @@ const STRIP_UNITS: u16 = 36;
 pub fn preview(model: &Model, face: &Face, sample: Sample, numbers: bool, name: &str) -> Buffer {
     let looks = sample_looks(model, face, sample);
     let view =
-        |layout| FaceView { model, face, layout, name, amps: "4.1A", looks: &looks, numbers };
+        |layout| FaceView { model, face, layout, name, amps: SAMPLE_AMPS, looks: &looks, numbers };
     if face.kind != FaceKind::Strip {
         let layout = FaceLayout::new(face, FACE_WIDTH);
         let slice = Slice { panel: Panel { face: view(&layout) }, unit: UNIT, rows_per_unit: 2 };
