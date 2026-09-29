@@ -52,7 +52,6 @@ pub enum Origin {
 /// One model file and, once it has been requested, the result of reading it.
 #[derive(Debug)]
 struct Entry {
-    origin: Origin,
     source: Source,
     model: OnceLock<Result<Model, FileError>>,
 }
@@ -67,6 +66,14 @@ enum Source {
 }
 
 impl Source {
+    /// Returns where a model read from this source comes from.
+    const fn origin(&self) -> Origin {
+        match self {
+            Self::Embedded { .. } => Origin::BuiltIn,
+            Self::File(_) => Origin::User,
+        }
+    }
+
     /// Returns the name used for the file in error messages.
     fn name(&self) -> String {
         match self {
@@ -98,7 +105,7 @@ impl Catalog {
         for &(path, text) in BUILTIN {
             if is_model_file(Path::new(path)) {
                 let id = model_id(Path::new(""), Path::new(path));
-                catalog.insert(id, Origin::BuiltIn, Source::Embedded { path, text });
+                catalog.insert(id, Source::Embedded { path, text });
             }
         }
         catalog
@@ -144,7 +151,7 @@ impl Catalog {
     /// Returns where the model `id` comes from, or `None` if the catalog has no such model.
     #[must_use]
     pub fn origin(&self, id: &str) -> Option<Origin> {
-        self.entries.get(id).map(|entry| entry.origin)
+        self.entries.get(id).map(|entry| entry.source.origin())
     }
 
     /// Returns the model `id`, reading its file the first time it is requested.
@@ -173,13 +180,13 @@ impl Catalog {
 
     /// Adds a model, replacing any model with the same identifier. A model whose identifier
     /// is invalid is recorded with the problem, so that it is reported when requested.
-    fn insert(&mut self, id: String, origin: Origin, source: Source) {
+    fn insert(&mut self, id: String, source: Source) {
         let model = if is_valid_id(&id) {
             OnceLock::new()
         } else {
             OnceLock::from(Err(invalid_name(source.name())))
         };
-        self.entries.insert(id, Entry { origin, source, model });
+        self.entries.insert(id, Entry { source, model });
     }
 
     /// Adds the model files in `dir` and its subdirectories, naming them relative to `root`.
@@ -200,7 +207,7 @@ impl Catalog {
             if file_type.is_dir() {
                 self.add_dir(root, &path)?;
             } else if is_model_file(&path) {
-                self.insert(model_id(root, &path), Origin::User, Source::File(path));
+                self.insert(model_id(root, &path), Source::File(path));
             }
         }
         Ok(())
