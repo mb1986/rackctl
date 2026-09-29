@@ -108,6 +108,7 @@ mod tests {
 
     use super::*;
     use crate::ui::art::{FaceLayout, Look};
+    use crate::ui::text::plain;
     use crate::ui::theme::Tone;
 
     /// Paints the panel of a model with `extra` nodes and a face of `rows`, 4 columns wide.
@@ -137,24 +138,17 @@ mod tests {
         buf
     }
 
-    fn lines(buf: &Buffer) -> Vec<String> {
-        let area = buf.area;
-        (area.top()..area.bottom())
-            .map(|y| (area.left()..area.right()).map(|x| buf[(x, y)].symbol()).collect())
-            .collect()
-    }
-
     #[test]
     fn frames_the_face_with_ears() {
-        assert_eq!(lines(&paint("height 2", "p\n\n\n")), ["┓●   ┏", "┃    ┃", "┃    ┃", "┛    ┗"]);
-        assert_eq!(lines(&paint("", "p\n")), ["┓●   ┏", "┛    ┗"]);
+        assert_eq!(plain(&paint("height 2", "p\n\n\n")), ["┓●   ┏", "┃    ┃", "┃    ┃", "┛    ┗"]);
+        assert_eq!(plain(&paint("", "p\n")), ["┓●   ┏", "┛    ┗"]);
         assert_eq!(ears(Ears::Heavy, 0, 1), ('╸', '╺'));
     }
 
     #[test]
     fn puts_screws_on_the_first_and_last_row() {
         let buf = paint(r#"height 2; ears "screws""#, "p\n\n\n");
-        assert_eq!(lines(&buf), ["⊕●   ⊕", "      ", "      ", "⊕    ⊕"]);
+        assert_eq!(plain(&buf), ["⊕●   ⊕", "      ", "      ", "⊕    ⊕"]);
     }
 
     #[test]

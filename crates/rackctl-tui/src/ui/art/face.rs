@@ -160,6 +160,7 @@ mod tests {
     use ratatui::style::Color;
 
     use super::*;
+    use crate::ui::text::plain;
 
     /// A 1U server named `Dell PowerEdge` (`R630`), with `counts` and the picture `rows`.
     fn server(rows: [&str; 2], counts: &str, legend: &str) -> Model {
@@ -194,13 +195,6 @@ mod tests {
         buf
     }
 
-    fn lines(buf: &Buffer) -> Vec<String> {
-        let area = buf.area;
-        (area.top()..area.bottom())
-            .map(|y| (area.left()..area.right()).map(|x| buf[(x, y)].symbol()).collect())
-            .collect()
-    }
-
     const GOOD: Look = Look { state: State::Ok, tone: Tone::Good };
 
     #[test]
@@ -216,7 +210,7 @@ mod tests {
             ('l' | 's', _) => Look { state: State::Up, tone: Tone::Link },
             _ => GOOD,
         });
-        assert_eq!(lines(&buf), ["● [■] ▣□ ▬  ", "            "]);
+        assert_eq!(plain(&buf), ["● [■] ▣□ ▬  ", "            "]);
         let (literal, down, panel) = (&buf[(1, 0)], &buf[(7, 0)], &buf[(0, 1)]);
         assert_eq!((literal.fg, literal.bg), (LITERAL, PANEL));
         assert_eq!((down.fg, down.bg), (Color::Indexed(240), PANEL));
@@ -230,7 +224,7 @@ mod tests {
             Some(2) => Look { state: State::Empty, tone: Tone::Dim },
             _ => GOOD,
         });
-        assert_eq!(lines(&buf)[0], "[■] [ ]");
+        assert_eq!(plain(&buf)[0], "[■] [ ]");
     }
 
     #[test]
@@ -241,7 +235,7 @@ mod tests {
             r#"n name; h short; t text="Hello World"; m model; a amps align="right""#,
         );
         let buf = paint(&model, 18, false, |_| GOOD);
-        assert_eq!(lines(&buf), ["srv01   R630 Hell…", "Dell Powe…  4.1A  "]);
+        assert_eq!(plain(&buf), ["srv01   R630 Hell…", "Dell Powe…  4.1A  "]);
         assert!(buf[(0, 0)].modifier.contains(Modifier::BOLD));
     }
 
@@ -250,13 +244,13 @@ mod tests {
         let model =
             server(["##b b##", "~"], "bays 2", r##""#" number gap=1; b bay first=10; ~ fill"##);
         let buf = paint(&model, 7, false, |_| GOOD);
-        assert_eq!(lines(&buf)[0], "0 ■ ■ 1");
+        assert_eq!(plain(&buf)[0], "0 ■ ■ 1");
         assert_eq!(buf[(0, 0)].fg, LITERAL);
     }
 
     #[test]
     fn shows_numbers_instead_of_glyphs() {
         let model = server(["b__ b", "|||"], "bays 2", "b bay");
-        assert_eq!(lines(&paint(&model, 5, true, |_| GOOD)), ["  1 2", "     "]);
+        assert_eq!(plain(&paint(&model, 5, true, |_| GOOD)), ["  1 2", "     "]);
     }
 }
