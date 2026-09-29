@@ -18,6 +18,8 @@ use miette::{Diagnostic, LabeledSpan, NamedSource, Report, SourceSpan};
 use strum::VariantNames;
 use thiserror::Error;
 
+use crate::plural;
+
 /// A mistake found in a KDL file, together with the location it refers to.
 #[derive(Debug, Clone, PartialEq, Eq, Error, Diagnostic)]
 #[error("{message}")]
@@ -110,7 +112,7 @@ pub struct Spanned<T> {
 /// Every problem found in one file, bundled with the file's contents so that each problem
 /// can be displayed in context. The contents are shared by all the reports made from it.
 #[derive(Debug, Error, Diagnostic)]
-#[error("{name}: {}", count(.problems.len()))]
+#[error("{name}: {}", plural(.problems.len(), "problem"))]
 pub struct FileError {
     name: String,
     #[source_code]
@@ -165,11 +167,6 @@ impl FileError {
             })
             .collect()
     }
-}
-
-/// Formats a number of problems, for example `1 problem` or `3 problems`.
-fn count(problems: usize) -> String {
-    if problems == 1 { "1 problem".to_owned() } else { format!("{problems} problems") }
 }
 
 /// Parses `text` as a KDL v2 document.

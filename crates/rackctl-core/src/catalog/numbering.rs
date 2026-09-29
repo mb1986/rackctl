@@ -6,6 +6,7 @@ use miette::SourceSpan;
 
 use super::model::Components;
 use crate::kdl_reader::{Problem, Spanned};
+use crate::plural;
 
 /// Where an element sits in the grid of its legend key: its row, and its column, which is
 /// its place along the row.
@@ -592,11 +593,6 @@ fn layout_grid(
         }));
     }
     Some(placed)
-}
-
-/// Writes a count with its noun, such as `1 row` or `3 rows`.
-fn plural(count: usize, noun: &str) -> String {
-    if count == 1 { format!("1 {noun}") } else { format!("{count} {noun}s") }
 }
 
 #[cfg(test)]

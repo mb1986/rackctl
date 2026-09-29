@@ -8,6 +8,7 @@ use super::legend::{Legend, Part, PartKind};
 use super::model::Mount;
 use super::numbering::Numbers;
 use crate::kdl_reader::{NodeReader, Problem};
+use crate::plural;
 
 /// The widest a strip face may be, in columns.
 pub const STRIP_WIDTH: usize = 5;
@@ -507,15 +508,12 @@ pub fn check_faces(
             _ => None,
         };
         if let Some((height, expected)) = expected.filter(|&(_, rows)| rows != face.rows.len()) {
-            let rows = |count: usize| {
-                if count == 1 { "1 row".to_owned() } else { format!("{count} rows") }
-            };
             problems.push(Problem::new(
                 format!(
                     "the {} face has {}; a {height}U model needs {}",
                     face.kind.name(),
-                    rows(face.rows.len()),
-                    rows(expected)
+                    plural(face.rows.len(), "row"),
+                    plural(expected, "row")
                 ),
                 face.span,
             ));
@@ -572,8 +570,7 @@ pub fn check_glyphs(faces: &Faces, legend: &Legend, problems: &mut Vec<Problem>)
                 element.key == entry.key && length > 1 && element.width * element.height != length
             });
             if let Some(element) = misfit {
-                let cells = element.width * element.height;
-                let cells = if cells == 1 { "1 cell".to_owned() } else { format!("{cells} cells") };
+                let cells = plural(element.width * element.height, "cell");
                 problems.push(
                     Problem::new(
                         format!(

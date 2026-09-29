@@ -26,6 +26,11 @@ pub(crate) fn is_identifier(name: &str) -> bool {
         && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
+/// Writes a count with its noun, such as `1 row` or `3 rows`.
+pub(crate) fn plural(count: usize, noun: &str) -> String {
+    if count == 1 { format!("1 {noun}") } else { format!("{count} {noun}s") }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -38,5 +43,10 @@ mod tests {
         for invalid in ["", "-", "-a", "a-", "Ghost", "a_b", "a b", "a.b"] {
             assert!(!is_identifier(invalid), "{invalid}");
         }
+    }
+
+    #[test]
+    fn writes_counts_with_their_nouns() {
+        assert_eq!([0, 1, 3].map(|count| plural(count, "row")), ["0 rows", "1 row", "3 rows"]);
     }
 }
