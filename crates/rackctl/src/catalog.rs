@@ -1,4 +1,4 @@
-//! `rackctl catalog show`: draws a model's face in a slice of rack.
+//! `rackctl catalog show`: draws a model's face.
 
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -70,13 +70,8 @@ fn draw(args: &ShowArgs, config: Option<PathBuf>, locations: &Locations) -> io::
             return Ok(ExitCode::from(CONFIG_ERROR));
         }
     };
-    let Some(face) = &model.faces.normal else {
-        let reason = if model.faces.strip.is_some() {
-            "has a strip face, which cannot be drawn yet"
-        } else {
-            "has no face"
-        };
-        writeln!(err, "rackctl: `{}` {reason}", args.id)?;
+    let Some(face) = model.faces.normal.as_ref().or(model.faces.strip.as_ref()) else {
+        writeln!(err, "rackctl: `{}` has no face", args.id)?;
         return Ok(ExitCode::FAILURE);
     };
 

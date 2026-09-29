@@ -1,6 +1,6 @@
-//! A device's panel: its face framed by ears.
+//! A device's panel: its face in a frame.
 
-use rackctl_core::catalog::Ears;
+use rackctl_core::catalog::{Ears, FaceKind};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -9,23 +9,29 @@ use ratatui::widgets::Widget;
 use super::FaceView;
 use crate::ui::theme::{EAR, PANEL, UNDERLINE};
 
-/// A device's panel: its face between two ears, underlined on its last row.
+/// A device's panel: its face between two ears and underlined, or a strip's face in a thin
+/// frame.
 #[derive(Clone, Copy)]
 pub struct Panel<'a> {
     pub face: FaceView<'a>,
 }
 
 impl Panel<'_> {
-    /// Returns the panel's width: the face and its ears.
+    /// Returns the panel's width: the face and its frame.
     #[must_use]
     pub fn width(&self) -> u16 {
         u16::try_from(self.face.layout.width() + 2).unwrap_or(u16::MAX)
     }
 
-    /// Returns the panel's height: the face's rows.
+    /// Returns the panel's height: the face, and for a strip, its frame.
     #[must_use]
     pub fn height(&self) -> u16 {
-        u16::try_from(self.face.face.rows().count()).unwrap_or(u16::MAX)
+        let frame = if self.is_strip() { 2 } else { 0 };
+        u16::try_from(self.face.layout.height() + frame).unwrap_or(u16::MAX)
+    }
+
+    fn is_strip(&self) -> bool {
+        self.face.face.kind == FaceKind::Strip
     }
 }
 
@@ -35,22 +41,49 @@ impl Widget for Panel<'_> {
         if area.width < 2 || area.height == 0 {
             return;
         }
-        self.face.render(Rect { x: area.x + 1, width: area.width - 2, ..area }, buf);
-        let style = Style::new().fg(EAR).bg(PANEL);
-        let rows = usize::from(area.height);
-        for (row, y) in (area.top()..area.bottom()).enumerate() {
-            let (left, right) = ears(self.face.model.ears, row, rows);
-            for (x, ear) in [(area.left(), left), (area.right() - 1, right)] {
-                if let Some(cell) = buf.cell_mut((x, y)) {
-                    cell.set_char(ear).set_style(style);
-                }
+        if self.is_strip() {
+            if area.height >= 2 {
+                render_strip(self.face, area, buf);
+            }
+        } else {
+            render_ears(self.face, area, buf);
+        }
+    }
+}
+
+/// Draws a strip's face in a thin frame.
+fn render_strip(face: FaceView<'_>, area: Rect, buf: &mut Buffer) {
+    face.render(
+        Rect { x: area.x + 1, y: area.y + 1, width: area.width - 2, height: area.height - 2 },
+        buf,
+    );
+    let style = Style::new().fg(EAR).bg(PANEL);
+    let inside = usize::from(area.width - 2);
+    buf.set_string(area.x, area.y, format!("🭽{}🭾", "▔".repeat(inside)), style);
+    buf.set_string(area.x, area.bottom() - 1, format!("🭼{}🭿", "▁".repeat(inside)), style);
+    for y in area.top() + 1..area.bottom() - 1 {
+        buf.set_string(area.x, y, "▏", style);
+        buf.set_string(area.right() - 1, y, "▕", style);
+    }
+}
+
+/// Draws a face between two ears, underlined on its last row.
+fn render_ears(face: FaceView<'_>, area: Rect, buf: &mut Buffer) {
+    face.render(Rect { x: area.x + 1, width: area.width - 2, ..area }, buf);
+    let style = Style::new().fg(EAR).bg(PANEL);
+    let rows = usize::from(area.height);
+    for (row, y) in (area.top()..area.bottom()).enumerate() {
+        let (left, right) = ears(face.model.ears, row, rows);
+        for (x, ear) in [(area.left(), left), (area.right() - 1, right)] {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_char(ear).set_style(style);
             }
         }
-        let underline = Style::new().add_modifier(Modifier::UNDERLINED).underline_color(UNDERLINE);
-        for x in area.left()..area.right() {
-            if let Some(cell) = buf.cell_mut((x, area.bottom() - 1)) {
-                cell.set_style(underline);
-            }
+    }
+    let underline = Style::new().add_modifier(Modifier::UNDERLINED).underline_color(UNDERLINE);
+    for x in area.left()..area.right() {
+        if let Some(cell) = buf.cell_mut((x, area.bottom() - 1)) {
+            cell.set_style(underline);
         }
     }
 }

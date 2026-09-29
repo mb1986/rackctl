@@ -45,8 +45,10 @@ impl Widget for FaceView<'_> {
         let elements = self.face.elements();
         let shown: Vec<(Vec<char>, Style)> =
             elements.iter().enumerate().map(|(index, element)| self.show(index, element)).collect();
-        for (y, (row, columns)) in (area.y..area.bottom()).zip(self.layout.rows().enumerate()) {
-            for (x, column) in (area.x..area.right()).zip(columns) {
+        for (y, row) in (area.y..area.bottom()).zip(self.layout.rows()) {
+            let (row, columns) = row.unwrap_or((0, &[]));
+            for (x, at) in (area.x..area.right()).zip(0..self.layout.width()) {
+                let column = columns.get(at).copied().flatten();
                 let (ch, style) = match column.and_then(|at| Some((at, self.face.cell(row, at)?))) {
                     Some((_, Cell::Literal(ch))) => (ch, BASE.fg(LITERAL)),
                     Some((at, Cell::Element(index))) => {

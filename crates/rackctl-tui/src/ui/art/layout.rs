@@ -2,12 +2,14 @@
 
 use rackctl_core::catalog::{Cell, Face, Part};
 
-/// A face laid out at a width.
+/// A face laid out at a width, and for a strip, at a height.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FaceLayout {
     width: usize,
-    /// The picture column each screen column shows, row by row; `None` is blank.
-    rows: Vec<Vec<Option<usize>>>,
+    /// For each picture row, the picture column each screen column shows; `None` is blank.
+    columns: Vec<Vec<Option<usize>>>,
+    /// The picture row each screen row shows; `None` is blank.
+    rows: Vec<Option<usize>>,
 }
 
 impl FaceLayout {
@@ -15,7 +17,7 @@ impl FaceLayout {
     #[must_use]
     pub fn new(face: &Face, width: usize) -> Self {
         let is_fill = |cell: &Cell| matches!(cell, Cell::Element(index) if face.elements()[*index].part == Part::Fill);
-        let rows = face
+        let columns: Vec<Vec<Option<usize>>> = face
             .cells()
             .map(|cells| {
                 let fills = cells.iter().filter(|cell| is_fill(cell)).count();
@@ -36,7 +38,42 @@ impl FaceLayout {
                 columns
             })
             .collect();
-        Self { width, rows }
+        let rows = (0..columns.len()).map(Some).collect();
+        Self { width, columns, rows }
+    }
+
+    /// Lays out `face` at `width` columns and `height` rows. Rows holding only fills share the
+    /// spare rows, the first ones taking the remainder, and a taller face is cut.
+    #[must_use]
+    pub fn stretched(face: &Face, width: usize, height: usize) -> Self {
+        let mut layout = Self::new(face, width);
+        let is_fill = |cell: &Cell| matches!(cell, Cell::Element(index) if face.elements()[*index].part == Part::Fill);
+        let blank = |cell: &Cell| *cell == Cell::Literal(' ');
+        let fill_rows: Vec<bool> = face
+            .cells()
+            .map(|cells| {
+                let start = cells.iter().position(|cell| !blank(cell)).unwrap_or(cells.len());
+                let end = cells.iter().rposition(|cell| !blank(cell)).map_or(start, |end| end + 1);
+                start < end && cells[start..end].iter().all(is_fill)
+            })
+            .collect();
+        let fills = fill_rows.iter().filter(|&&fill| fill).count();
+        let spare = (height + fills).checked_sub(fill_rows.len()).filter(|_| fills > 0);
+        if let Some(spare) = spare {
+            layout.rows.clear();
+            let mut fill = 0;
+            for (row, &is_fill) in fill_rows.iter().enumerate() {
+                if is_fill {
+                    let extra = usize::from(fill < spare % fills);
+                    layout.rows.extend(std::iter::repeat_n(None, spare / fills + extra));
+                    fill += 1;
+                } else {
+                    layout.rows.push(Some(row));
+                }
+            }
+        }
+        layout.rows.resize(height, None);
+        layout
     }
 
     /// Returns the width the face is laid out at.
@@ -45,9 +82,16 @@ impl FaceLayout {
         self.width
     }
 
-    /// Returns the picture column each screen column shows, row by row; `None` is blank.
-    pub fn rows(&self) -> impl Iterator<Item = &[Option<usize>]> {
-        self.rows.iter().map(Vec::as_slice)
+    /// Returns the height the face is laid out at.
+    #[must_use]
+    pub const fn height(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// Returns, for each screen row, the picture row it shows with the picture column of each
+    /// screen column, or `None` for a blank row.
+    pub fn rows(&self) -> impl Iterator<Item = Option<(usize, &[Option<usize>])>> {
+        self.rows.iter().map(|row| row.map(|row| (row, self.columns[row].as_slice())))
     }
 }
 
@@ -58,33 +102,55 @@ mod tests {
 
     use super::*;
 
-    /// Lays out a 1U face and draws the picture character each column shows.
-    fn laid_out(rows: [&str; 2], width: usize) -> Vec<String> {
-        let [top, bottom] = rows;
-        let used = |key| top.contains(key) || bottom.contains(key);
+    /// Returns the face of a model with the picture `rows`: a 1U server's, or a strip's.
+    fn face(rows: &[&str], strip: bool) -> Face {
+        let picture = rows.join("\n");
+        let used = |key| picture.contains(key);
         let legend = [('~', "~ fill"), ('.', ". space")]
             .into_iter()
             .filter_map(|(key, entry)| used(key).then_some(entry))
             .collect::<Vec<_>>()
             .join("; ");
+        let (kind, face) =
+            if strip { (r#"pdu"; mount "side"#, "face strip=#true") } else { ("server", "face") };
         let text = formatdoc! {r##"
-            model {{ name "X"; kind "server"
-            face #"""
-            {top}
-            {bottom}
+            model {{ name "X"; kind "{kind}"
+            {face} #"""
+            {picture}
             """#
             legend {{ {legend} }} }}"##};
-        let model = Model::parse("x/y", &text).expect("valid model");
-        let face = model.faces.normal.expect("normal face");
-        let layout = FaceLayout::new(&face, width);
+        let faces = Model::parse("x/y", &text).expect("valid model").faces;
+        faces.strip.or(faces.normal).expect("a face")
+    }
+
+    /// Draws the picture character each screen column shows.
+    fn draw(face: &Face, layout: &FaceLayout) -> Vec<String> {
         let pictures: Vec<Vec<char>> = face.rows().map(|row| row.chars().collect()).collect();
+        let blank = " ".repeat(layout.width());
         layout
             .rows()
-            .zip(&pictures)
-            .map(|(columns, picture)| {
-                columns.iter().map(|column| column.map_or(' ', |at| picture[at])).collect()
+            .map(|row| {
+                row.map_or_else(
+                    || blank.clone(),
+                    |(row, columns)| {
+                        columns
+                            .iter()
+                            .map(|column| column.map_or(' ', |at| pictures[row][at]))
+                            .collect()
+                    },
+                )
             })
             .collect()
+    }
+
+    fn laid_out(rows: [&str; 2], width: usize) -> Vec<String> {
+        let face = face(&rows, false);
+        draw(&face, &FaceLayout::new(&face, width))
+    }
+
+    fn stretched(rows: &[&str], height: usize) -> Vec<String> {
+        let face = face(rows, true);
+        draw(&face, &FaceLayout::stretched(&face, 1, height))
     }
 
     #[test]
@@ -100,5 +166,19 @@ mod tests {
     #[test]
     fn gives_fills_nothing_when_the_row_is_full() {
         assert_eq!(laid_out(["ab~cd", "~"], 4), ["abcd", "    "]);
+    }
+
+    #[test]
+    fn shares_the_spare_rows_between_the_fill_rows() {
+        assert_eq!(
+            stretched(&["a", "~", "b", "~", "c"], 8),
+            ["a", " ", " ", " ", "b", " ", " ", "c"]
+        );
+    }
+
+    #[test]
+    fn pads_and_cuts_a_strip_without_fill_rows() {
+        assert_eq!(stretched(&["a", "b", "c"], 4), ["a", "b", "c", " "]);
+        assert_eq!(stretched(&["a", "b", "c"], 2), ["a", "b"]);
     }
 }

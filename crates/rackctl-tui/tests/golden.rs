@@ -18,18 +18,17 @@ fn draws_every_face_as_its_golden_files() {
         for file in fs::read_dir(&vendor).expect("vendor directory") {
             let path = file.expect("golden file").path();
             let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
-            // Strip faces are drawn beside the rack, not in a slice of it.
-            let Some(stem) = file_name.strip_suffix(".txt").filter(|stem| !stem.contains(".strip"))
-            else {
-                continue;
-            };
-            let (name, variant) = stem.split_once('.').unwrap_or((stem, ""));
+            let Some(stem) = file_name.strip_suffix(".txt") else { continue };
+            // Such as `ap7952.strip.numbers`: the model, then its face and drawing options.
+            let (name, options) = stem.split_once('.').unwrap_or((stem, ""));
+            let option = |option| options.split('.').any(|given| given == option);
             let vendor_name = vendor.file_name().and_then(|name| name.to_str()).unwrap_or_default();
             let id = format!("{vendor_name}/{name}");
             let model = catalog.model(&id).unwrap_or_else(|error| panic!("{id}: {error}"));
-            let face = model.faces.normal.as_ref().unwrap_or_else(|| panic!("{id}: no face"));
-            let sample = if variant == "off" { Sample::Off } else { Sample::Normal };
-            let buf = preview(model, face, sample, variant == "numbers", "srv01");
+            let face = if option("strip") { &model.faces.strip } else { &model.faces.normal };
+            let face = face.as_ref().unwrap_or_else(|| panic!("{id}: no such face"));
+            let sample = if option("off") { Sample::Off } else { Sample::Normal };
+            let buf = preview(model, face, sample, option("numbers"), "srv01");
             let drawn: String = text::plain(&buf).into_iter().map(|line| line + "\n").collect();
             if drawn != fs::read_to_string(&path).expect("golden file") {
                 different.push(format!("{vendor_name}/{file_name}"));
