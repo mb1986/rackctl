@@ -202,9 +202,8 @@ impl Face {
 
     /// Cuts the picture into cells and elements. A character that is a legend key starts an
     /// element; `_` extends the LED, numbered element or text on its left, and `|` the LED
-    /// or numbered element above it; any other character is drawn as it is. Returns whether
-    /// each element is a rectangle.
-    fn cut(&mut self, legend: &Legend, problems: &mut Vec<Problem>) -> Vec<bool> {
+    /// or numbered element above it; any other character is drawn as it is.
+    fn cut(&mut self, legend: &Legend, problems: &mut Vec<Problem>) {
         // The byte offset of each character of each row, and of the row's end.
         let offsets: Vec<Vec<usize>> = self
             .rows
@@ -288,36 +287,27 @@ impl Face {
             cells.push(line);
         }
 
-        let rectangles = self.check_rectangles(&offsets, &cells, &mut elements, problems);
+        self.check_rectangles(&offsets, &cells, &mut elements, problems);
         link_number_fields(&cells, &mut elements, legend, problems);
         self.cells = cells;
         self.elements = elements;
-        rectangles
     }
 
-    /// Sets each element's location to its top row, reports the elements that are not
-    /// rectangles and returns whether each one is.
+    /// Sets each element's location to its top row, and reports the elements that are not
+    /// rectangles.
     fn check_rectangles(
         &self,
         offsets: &[Vec<usize>],
         cells: &[Vec<Cell>],
         elements: &mut [Element],
         problems: &mut Vec<Problem>,
-    ) -> Vec<bool> {
-        let mut counts = vec![0; elements.len()];
-        for cell in cells.iter().flatten() {
-            if let Cell::Element(index) = cell {
-                counts[*index] += 1;
-            }
-        }
-        let mut rectangles = Vec::with_capacity(elements.len());
-        for (element, count) in elements.iter_mut().zip(counts) {
+    ) {
+        let rectangles = rectangles(cells, elements);
+        for (element, rectangle) in elements.iter_mut().zip(rectangles) {
             let row = &offsets[element.row];
             let end =
                 row.get(element.column + element.width).copied().unwrap_or(row[row.len() - 1]);
             element.span = self.bytes_span(element.row, row[element.column], end);
-            let rectangle = count == element.width * element.height;
-            rectangles.push(rectangle);
             if !rectangle {
                 problems.push(
                     Problem::new("this element is not a rectangle", element.span).with_help(
@@ -327,8 +317,22 @@ impl Face {
                 );
             }
         }
-        rectangles
     }
+}
+
+/// Returns whether each element covers its whole rectangle.
+fn rectangles(cells: &[Vec<Cell>], elements: &[Element]) -> Vec<bool> {
+    let mut counts = vec![0; elements.len()];
+    for cell in cells.iter().flatten() {
+        if let Cell::Element(index) = cell {
+            counts[*index] += 1;
+        }
+    }
+    elements
+        .iter()
+        .zip(counts)
+        .map(|(element, count)| count == element.width * element.height)
+        .collect()
 }
 
 /// Links each number field to the numbered element it touches on its left or right, and
@@ -532,30 +536,21 @@ pub fn check_faces(
 }
 
 /// Cuts the faces into cells and elements, telling live characters from literal ones with
-/// the legend. Returns whether each element of each face is a rectangle.
-pub fn cut_faces(
-    faces: &mut Faces,
-    legend: &Legend,
-    problems: &mut Vec<Problem>,
-) -> Vec<Vec<bool>> {
-    faces.iter_mut().map(|face| face.cut(legend, problems)).collect()
+/// the legend.
+pub fn cut_faces(faces: &mut Faces, legend: &Legend, problems: &mut Vec<Problem>) {
+    for face in faces.iter_mut() {
+        face.cut(legend, problems);
+    }
 }
 
 /// Checks that every glyph fits the elements drawn with it: each of its characters is one
 /// column wide, and it is one character, which fills the element, or one per cell.
-/// `rectangles` is what [`cut_faces`] returns.
-pub fn check_glyphs(
-    faces: &Faces,
-    rectangles: &[Vec<bool>],
-    legend: &Legend,
-    problems: &mut Vec<Problem>,
-) {
+pub fn check_glyphs(faces: &Faces, legend: &Legend, problems: &mut Vec<Problem>) {
     // Elements that are not rectangles have no size to compare with; they are reported.
     let elements: Vec<&Element> = faces
         .iter()
-        .zip(rectangles)
-        .flat_map(|(face, rectangles)| face.elements.iter().zip(rectangles))
-        .filter_map(|(element, &rectangle)| rectangle.then_some(element))
+        .flat_map(|face| face.elements.iter().zip(rectangles(&face.cells, &face.elements)))
+        .filter_map(|(element, rectangle)| rectangle.then_some(element))
         .collect();
     for entry in legend.entries() {
         for glyph in entry.glyphs() {
