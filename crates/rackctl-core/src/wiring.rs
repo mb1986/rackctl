@@ -1,11 +1,14 @@
 //! Wiring: the cables between devices, as described in `wiring.kdl`.
 
+mod cabling;
 mod endpoint;
+mod resolve;
 
 use kdl::{KdlDocument, KdlNode};
 use miette::SourceSpan;
 use strum::{EnumString, IntoStaticStr, VariantNames};
 
+pub use cabling::{Cabling, End, Endpoint, Link, SocketId};
 pub use endpoint::{EndpointName, EndpointRef, PatchSide, parse_endpoint};
 
 use crate::kdl_reader::{self, NodeReader, Problem, span_of};

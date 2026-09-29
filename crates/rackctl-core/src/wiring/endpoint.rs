@@ -1,5 +1,7 @@
 //! Endpoints as written in the wiring, such as `srv01:psu1` or `patch-32:b-f14`.
 
+use std::fmt;
+
 use miette::SourceSpan;
 
 /// An endpoint as written: a device id and the name of one of its endpoints.
@@ -38,6 +40,45 @@ impl PatchSide {
             "b" | "back" => Some(Self::Back),
             "f" | "front" => Some(Self::Front),
             _ => None,
+        }
+    }
+
+    /// Returns the other side.
+    #[must_use]
+    pub const fn opposite(self) -> Self {
+        match self {
+            Self::Back => Self::Front,
+            Self::Front => Self::Back,
+        }
+    }
+
+    /// Returns the side's name in messages.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Back => "back",
+            Self::Front => "front",
+        }
+    }
+
+    /// Returns the side's short name, as in `b14`.
+    const fn short(self) -> char {
+        match self {
+            Self::Back => 'b',
+            Self::Front => 'f',
+        }
+    }
+}
+
+impl fmt::Display for EndpointName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Main(number) => write!(f, "{number}"),
+            Self::Named { word, number: Some(number) } => write!(f, "{word}{number}"),
+            Self::Named { word, number: None } => write!(f, "{word}"),
+            Self::Through { from, number } => {
+                write!(f, "{}-{}{number}", from.short(), from.opposite().short())
+            }
         }
     }
 }

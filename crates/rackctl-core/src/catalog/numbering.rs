@@ -536,7 +536,7 @@ fn report_gaps(
 }
 
 /// Returns the name of a numbered part in messages, and the node declaring its count.
-const fn names(part: Part) -> (&'static str, &'static str) {
+pub const fn names(part: Part) -> (&'static str, &'static str) {
     match part {
         Part::Bay => ("bay", "bays"),
         Part::Psu => ("PSU", "psus"),
