@@ -99,12 +99,11 @@ pub fn endpoint_name(endpoint: Endpoint, rack: &Rack, catalog: &Catalog) -> Stri
     };
     let (group, number) =
         model.endpoint_name(endpoint.part, endpoint.index).unwrap_or((None, fallback));
-    if main_part(model.kind) == Some(endpoint.part) {
-        format!("{}:{}{number}", device.id, group.unwrap_or(""))
-    } else if model.components.count(endpoint.part) == 1 {
-        format!("{}:{part}", device.id)
-    } else {
-        format!("{}:{part}{number}", device.id)
+    match group {
+        Some(group) => format!("{}:{group}{number}", device.id),
+        None if main_part(model.kind) == Some(endpoint.part) => format!("{}:{number}", device.id),
+        None if model.components.count(endpoint.part) == 1 => format!("{}:{part}", device.id),
+        None => format!("{}:{part}{number}", device.id),
     }
 }
 
