@@ -21,10 +21,7 @@ const LABEL: u16 = 3;
 #[must_use]
 pub fn front_view(rack: &Rack, catalog: &Catalog) -> Buffer {
     let art = RackArt::new(rack, catalog, FACE_WIDTH, 2, LabelRow::default());
-    let view = RackView { art: &art, numbers: false };
-    let mut buf = Buffer::empty(Rect::new(0, 0, view.width(), view.height()));
-    view.render(buf.area, &mut buf);
-    buf
+    RackView { art: &art, numbers: false, top: 0 }.canvas()
 }
 
 /// A device ready to draw.
@@ -120,8 +117,9 @@ impl<'a> RackArt<'a> {
             let Ok(model) = catalog.model(&device.model) else { continue };
             let Some(face) = &model.faces.strip else { continue };
             let units = device.units(model, rack.units);
-            // The frame takes the first and last row.
-            let height = art.map.span(units).len().saturating_sub(2);
+            // The frame takes the first and last row; a shorter strip has none.
+            let rows = art.map.span(units).len();
+            let height = if rows >= 2 { rows - 2 } else { rows };
             let layout = FaceLayout::stretched(face, STRIP_WIDTH, height);
             let strip = DeviceArt::sample(device, model, face, layout, units);
             match seen_from_front(side, device.face) {
@@ -162,12 +160,15 @@ const fn seen_from_front(side: Side, face: rack::Face) -> Side {
     }
 }
 
-/// The rack's rows with unit numbers and rails on each side, and its strips beside them.
+/// The rack's rows with unit numbers and rails on each side, and its strips beside them,
+/// shown from row `top` down.
 #[derive(Clone, Copy)]
 pub struct RackView<'a> {
     pub art: &'a RackArt<'a>,
     /// Whether numbered elements show their numbers instead of their glyphs.
     pub numbers: bool,
+    /// The first row shown.
+    pub top: u16,
 }
 
 impl RackView<'_> {
@@ -193,30 +194,33 @@ impl RackView<'_> {
         u16::try_from(self.art.width + 2).unwrap_or(u16::MAX)
     }
 
-    /// Draws a strip at column `x`, over the rows of its units.
-    fn render_strip(self, strip: &DeviceArt<'_>, x: u16, area: Rect, buf: &mut Buffer) {
-        let rows = self.art.map.span(strip.units);
-        let panel = strip.panel(self.numbers);
-        let y = area.y + u16::try_from(rows.start).unwrap_or(u16::MAX);
-        panel.render(Rect { x, y, width: panel.width(), height: panel.height() }, buf);
+    /// Draws the whole rack, whatever the size of the screen.
+    #[must_use]
+    pub fn canvas(self) -> Buffer {
+        let mut buf = Buffer::empty(Rect::new(0, 0, self.width(), self.height()));
+        self.draw(&mut buf);
+        buf
     }
-}
 
-/// Returns the columns of `count` strips, each with the gap next to it.
-fn strip_columns(count: usize) -> u16 {
-    u16::try_from((STRIP_WIDTH + 3) * count).unwrap_or(u16::MAX)
-}
+    /// Draws a strip at column `x`, over the rows of its units.
+    fn draw_strip(self, strip: &DeviceArt<'_>, x: u16, buf: &mut Buffer) {
+        let rows = self.art.map.span(strip.units);
+        let y = u16::try_from(rows.start).unwrap_or(u16::MAX);
+        let height = u16::try_from(rows.len()).unwrap_or(u16::MAX);
+        let panel = strip.panel(self.numbers);
+        panel.render(Rect { x, y, width: panel.width(), height }, buf);
+    }
 
-impl Widget for RackView<'_> {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        let area = area.intersection(Rect { width: self.width(), height: self.height(), ..area });
-        let rack_x = area.x + strip_columns(self.art.left.len());
+    /// Draws the whole rack into `buf`, a buffer of the view's size.
+    fn draw(self, buf: &mut Buffer) {
+        let area = buf.area;
+        let rack_x = strip_columns(self.art.left.len());
         for (index, strip) in self.art.left.iter().enumerate() {
-            self.render_strip(strip, rack_x - strip_columns(index + 1), area, buf);
+            self.draw_strip(strip, rack_x - strip_columns(index + 1), buf);
         }
         let after = rack_x + self.rack_width() + 1;
         for (index, strip) in self.art.right.iter().enumerate() {
-            self.render_strip(strip, after + strip_columns(index), area, buf);
+            self.draw_strip(strip, after + strip_columns(index), buf);
         }
 
         let rack = Style::new().fg(RACK);
@@ -244,6 +248,27 @@ impl Widget for RackView<'_> {
                     panel.render(Rect { y, height: panel.height(), ..inside }, buf);
                 }
                 RowKind::Device { .. } => {}
+            }
+        }
+    }
+}
+
+/// Returns the columns of `count` strips, each with the gap next to it.
+fn strip_columns(count: usize) -> u16 {
+    u16::try_from((STRIP_WIDTH + 3) * count).unwrap_or(u16::MAX)
+}
+
+impl Widget for RackView<'_> {
+    /// Shows the rows from `top` that fit in `area`.
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        let canvas = self.canvas();
+        let rows = canvas.area.height.saturating_sub(self.top).min(area.height);
+        let columns = canvas.area.width.min(area.width);
+        for y in 0..rows {
+            for x in 0..columns {
+                if let Some(cell) = buf.cell_mut((area.x + x, area.y + y)) {
+                    *cell = canvas[(x, self.top + y)].clone();
+                }
             }
         }
     }
@@ -292,10 +317,19 @@ mod tests {
                     """#
                   legend { p power; ~ fill } }"##},
         ),
+        (
+            "x/short.kdl",
+            indoc! {r##"
+                model { name "Short"; kind "pdu"; mount "side"; height 1
+                  face strip=#true #"""
+                    p
+                    """#
+                  legend { p power } }"##},
+        ),
     ];
 
-    /// Draws a 4-unit rack of `devices`, with faces 6 columns wide.
-    fn draw(devices: &str) -> Buffer {
+    /// Builds the view of a 4-unit rack of `devices`, with faces 6 columns wide, for `use_view`.
+    fn with_view<T>(devices: &str, rows_per_unit: u16, use_view: impl FnOnce(RackView) -> T) -> T {
         let dir = tempfile::tempdir().expect("temporary directory");
         fs::create_dir(dir.path().join("x")).expect("model directory");
         for (path, text) in MODELS {
@@ -303,11 +337,14 @@ mod tests {
         }
         let catalog = Catalog::open(&[dir.path()]).expect("readable catalog");
         let rack = Rack::parse(&format!("rack \"r\" units=4 {{\n{devices}\n}}")).expect("rack");
-        let art = RackArt::new(&rack, &catalog, 6, 2, LabelRow::Top);
-        let view = RackView { art: &art, numbers: false };
-        let mut buf = Buffer::empty(Rect::new(0, 0, view.width(), view.height()));
-        view.render(buf.area, &mut buf);
-        buf
+        let art = RackArt::new(&rack, &catalog, 6, rows_per_unit, LabelRow::Top);
+        use_view(RackView { art: &art, numbers: false, top: 0 })
+    }
+
+    /// Draws the whole of a 4-unit rack of `devices`.
+    #[expect(clippy::redundant_closure_for_method_calls, reason = "the method has one lifetime")]
+    fn draw(devices: &str) -> Buffer {
+        with_view(devices, 2, |view| view.canvas())
     }
 
     const DEVICES: &str = r#"
@@ -356,5 +393,39 @@ mod tests {
             "        🭼▁▁▁▁▁🭿    ┊┛      ┗┊    🭼▁▁▁▁▁🭿",
         ];
         assert_eq!(plain(&draw(&format!("{DEVICES}{strips}"))), rows);
+    }
+
+    #[test]
+    fn shows_the_rows_from_top_that_fit_the_area() {
+        let devices = format!("{DEVICES}\ndevice \"s\" model=\"x/strip\" mount=\"left\" u=3");
+        with_view(&devices, 2, |view| {
+            let canvas = view.canvas();
+            for (top, area) in [
+                (2, Rect::new(2, 1, 60, 4)),
+                (0, Rect::new(0, 0, 10, 3)),
+                (9, Rect::new(0, 0, 60, 4)),
+            ] {
+                let mut buf = Buffer::empty(Rect::new(0, 0, 50, 7));
+                RackView { top, ..view }.render(area, &mut buf);
+                for (x, y) in buf.area.positions().map(|position| (position.x, position.y)) {
+                    let inside = area.contains((x, y).into())
+                        && canvas.area.contains((x - area.x, y - area.y + top).into());
+                    let expected = if inside {
+                        canvas[(x - area.x, y - area.y + top)].clone()
+                    } else {
+                        ratatui::buffer::Cell::default()
+                    };
+                    assert_eq!(buf[(x, y)], expected, "top {top}, area {area:?}, cell ({x}, {y})");
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn draws_a_strip_of_one_row_without_its_frame() {
+        let rows = with_view(r#"device "s" model="x/short" mount="left""#, 1, |view| {
+            plain(&view.canvas())
+        });
+        assert_eq!(rows[3], " ●       1 ┊·┊    ┊·┊  1");
     }
 }

@@ -44,6 +44,8 @@ impl Widget for Panel<'_> {
         if self.is_strip() {
             if area.height >= 2 {
                 render_strip(self.face, area, buf);
+            } else {
+                self.face.render(Rect { x: area.x + 1, width: area.width - 2, ..area }, buf);
             }
         } else {
             render_ears(self.face, area, buf);
