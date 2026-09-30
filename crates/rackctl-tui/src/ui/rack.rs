@@ -58,6 +58,11 @@ impl<'a> DeviceArt<'a> {
         Self { name, model, face: Some(FaceArt { face, layout, looks }), units }
     }
 
+    /// Prepares the device `name` covering `units`, without a face.
+    pub(crate) const fn faceless(name: &'a str, model: &'a Model, units: UnitRange) -> Self {
+        Self { name, model, face: None, units }
+    }
+
     /// Prepares a device with the sample status, or without a face when there is none.
     fn sample(
         device: &'a Device,

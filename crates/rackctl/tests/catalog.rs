@@ -44,19 +44,26 @@ fn leaves_out_colours_with_no_color() {
 }
 
 #[test]
-fn reports_models_it_cannot_draw() {
-    // The user catalog is next to the rack file, which need not exist.
-    let dir = tempfile::tempdir().expect("temporary directory");
-    let model = dir.path().join("catalog/x/plate.kdl");
-    fs::create_dir_all(model.parent().expect("vendor directory")).expect("catalog directory");
-    fs::write(&model, r#"model { name "Plate"; kind "blank" }"#).expect("write the model");
-    let rack_file = dir.path().join("rack.kdl").display().to_string();
-    for (id, message) in [
-        ("nope/x", "rackctl: unknown model `nope/x`\n"),
-        ("x/plate", "rackctl: `x/plate` has no face\n"),
-    ] {
-        let output = show(&["-c", &rack_file, id]);
-        assert_eq!(output.status.code(), Some(1));
-        assert_eq!(String::from_utf8_lossy(&output.stderr), message);
-    }
+fn reports_an_unknown_model() {
+    let output = show(&["nope/x"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "rackctl: unknown model `nope/x`\n");
+}
+
+#[test]
+fn draws_a_model_without_a_face_as_an_empty_frame() {
+    let output = show(&["generic/blank-2u", "--plain"]);
+    assert!(output.status.success());
+    let (screws, plate) = (format!("┊⊕{}⊕┊", " ".repeat(48)), format!("┊{}┊", " ".repeat(50)));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let rows: Vec<&str> = stdout.lines().skip(2).take(4).collect();
+    assert_eq!(
+        rows,
+        [
+            format!("11 {screws} 11"),
+            format!("   {plate}   "),
+            format!("10 {plate} 10"),
+            format!("   {screws}   ")
+        ]
+    );
 }

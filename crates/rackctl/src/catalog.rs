@@ -61,10 +61,7 @@ pub fn show(
             return Ok(ExitCode::from(CONFIG_ERROR));
         }
     };
-    let Some(face) = model.faces.normal.as_ref().or(model.faces.strip.as_ref()) else {
-        writeln!(err, "rackctl: `{}` has no face", args.id)?;
-        return Ok(ExitCode::FAILURE);
-    };
+    let face = model.faces.normal.as_ref().or(model.faces.strip.as_ref());
 
     let sample = match args.state {
         SampleState::Normal => Sample::Normal,

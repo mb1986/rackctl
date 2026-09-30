@@ -28,7 +28,7 @@ fn draws_every_face_as_its_golden_files() {
             let face = if option("strip") { &model.faces.strip } else { &model.faces.normal };
             let face = face.as_ref().unwrap_or_else(|| panic!("{id}: no such face"));
             let sample = if option("off") { Sample::Off } else { Sample::Normal };
-            let buf = preview(model, face, sample, option("numbers"), "srv01");
+            let buf = preview(model, Some(face), sample, option("numbers"), "srv01");
             let drawn: String = text::plain(&buf).into_iter().map(|line| line + "\n").collect();
             if drawn != fs::read_to_string(&path).expect("golden file") {
                 different.push(format!("{vendor_name}/{file_name}"));

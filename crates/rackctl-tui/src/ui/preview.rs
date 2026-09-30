@@ -1,6 +1,6 @@
 //! A model's face with a sample status, in a slice of rack.
 
-use rackctl_core::catalog::{Face, FaceKind, Model, STRIP_WIDTH};
+use rackctl_core::catalog::{Face, FaceKind, Model, Mount, STRIP_WIDTH};
 use rackctl_core::rack::UnitRange;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -18,14 +18,27 @@ const UNIT: u16 = 10;
 const STRIP_UNITS: u16 = 36;
 
 /// Draws `face` of `model` with a sample status, as the device `name`: a rack device in a
-/// slice of rack, or a strip over its span with unit numbers.
+/// slice of rack, or a strip over its span with unit numbers. Without a face, the device is
+/// an empty frame.
 #[must_use]
-pub fn preview(model: &Model, face: &Face, sample: Sample, numbers: bool, name: &str) -> Buffer {
-    let looks = sample_looks(model, face, sample);
-    if face.kind != FaceKind::Strip {
+pub fn preview(
+    model: &Model,
+    face: Option<&Face>,
+    sample: Sample,
+    numbers: bool,
+    name: &str,
+) -> Buffer {
+    let strip = face.map_or(model.mount == Mount::Side, |face| face.kind == FaceKind::Strip);
+    if !strip {
         let units = UnitRange::new(UNIT, UNIT + model.height.map_or(1, u16::from) - 1);
-        let layout = FaceLayout::new(face, FACE_WIDTH);
-        let device = DeviceArt::new(name, model, face, layout, looks, units);
+        let device = face.map_or_else(
+            || DeviceArt::faceless(name, model, units),
+            |face| {
+                let layout = FaceLayout::new(face, FACE_WIDTH);
+                let looks = sample_looks(model, face, sample);
+                DeviceArt::new(name, model, face, layout, looks, units)
+            },
+        );
         let top = units.highest() + 1;
         let art = RackArt::from_devices(top, FACE_WIDTH, vec![device], LabelRow::Top);
         let view = RackView { art: &art, numbers, top: 0 };
@@ -38,9 +51,15 @@ pub fn preview(model: &Model, face: &Face, sample: Sample, numbers: bool, name: 
     }
     let units = model.height.map_or(STRIP_UNITS, u16::from);
     let rows = units * 2;
-    // The frame takes the first and last row.
-    let layout = FaceLayout::stretched(face, STRIP_WIDTH, usize::from(rows - 2));
-    let strip = DeviceArt::new(name, model, face, layout, looks, UnitRange::new(1, units));
+    let span = UnitRange::new(1, units);
+    let strip = face.map_or_else(
+        || DeviceArt::faceless(name, model, span),
+        |face| {
+            // The frame takes the first and last row.
+            let layout = FaceLayout::stretched(face, STRIP_WIDTH, usize::from(rows - 2));
+            DeviceArt::new(name, model, face, layout, sample_looks(model, face, sample), span)
+        },
+    );
     let width = u16::try_from(STRIP_WIDTH + 2).unwrap_or(u16::MAX);
     let mut buf = Buffer::empty(Rect::new(0, 0, width + 3, rows));
     for row in (0..rows).step_by(2) {
