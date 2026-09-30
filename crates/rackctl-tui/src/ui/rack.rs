@@ -1,13 +1,15 @@
 //! The rack: its devices in their slots, with rails and unit numbers, and strips beside it.
 
-use rackctl_core::catalog::{Catalog, Face, Model, STRIP_WIDTH};
+use rackctl_core::catalog::{Catalog, Face, Kind, Model, STRIP_WIDTH};
 use rackctl_core::rack::{self, Device, Placement, Rack, Side, UnitRange};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::Widget;
 
-use crate::ui::art::{FaceLayout, FaceView, Look, Panel, SAMPLE_AMPS, Sample, sample_looks};
+use crate::ui::art::{
+    BlankPanel, FaceLayout, FaceView, Look, Panel, SAMPLE_AMPS, Sample, sample_looks,
+};
 use crate::ui::rowmap::{LabelRow, RowKind, RowMap};
 use crate::ui::theme::{RACK, UNDERLINE};
 
@@ -31,10 +33,16 @@ pub fn front_view(rack: &Rack, catalog: &Catalog) -> Buffer {
 pub(crate) struct DeviceArt<'a> {
     name: &'a str,
     model: &'a Model,
+    /// `None` for a model without a face for the device's place.
+    face: Option<FaceArt<'a>>,
+    units: UnitRange,
+}
+
+/// A face laid out, with the look of each of its elements.
+struct FaceArt<'a> {
     face: &'a Face,
     layout: FaceLayout,
     looks: Vec<Look>,
-    units: UnitRange,
 }
 
 impl<'a> DeviceArt<'a> {
@@ -47,33 +55,42 @@ impl<'a> DeviceArt<'a> {
         looks: Vec<Look>,
         units: UnitRange,
     ) -> Self {
-        Self { name, model, face, layout, looks, units }
+        Self { name, model, face: Some(FaceArt { face, layout, looks }), units }
     }
 
-    /// Prepares a device with the sample status.
+    /// Prepares a device with the sample status, or without a face when there is none.
     fn sample(
         device: &'a Device,
         model: &'a Model,
-        face: &'a Face,
-        layout: FaceLayout,
+        face: Option<(&'a Face, FaceLayout)>,
         units: UnitRange,
     ) -> Self {
-        let looks = sample_looks(model, face, Sample::Normal);
-        Self::new(&device.id, model, face, layout, looks, units)
+        let face = face.map(|(face, layout)| FaceArt {
+            face,
+            layout,
+            looks: sample_looks(model, face, Sample::Normal),
+        });
+        Self { name: &device.id, model, face, units }
     }
 
-    fn panel(&self, numbers: bool) -> Panel<'_> {
-        Panel {
-            face: FaceView {
-                model: self.model,
-                face: self.face,
-                layout: &self.layout,
-                name: self.name,
-                amps: SAMPLE_AMPS,
-                looks: &self.looks,
-                numbers,
-            },
-        }
+    /// Draws the device over `area`: its face in a frame, or the frame alone.
+    fn render(&self, numbers: bool, strip: bool, area: Rect, buf: &mut Buffer) {
+        let Some(face) = &self.face else {
+            let named = !matches!(self.model.kind, Kind::Blank | Kind::Shelf);
+            let name = named.then_some(self.name);
+            BlankPanel { ears: self.model.ears, strip, name }.render(area, buf);
+            return;
+        };
+        let face = FaceView {
+            model: self.model,
+            face: face.face,
+            layout: &face.layout,
+            name: self.name,
+            amps: SAMPLE_AMPS,
+            looks: &face.looks,
+            numbers,
+        };
+        Panel { face }.render(area, buf);
     }
 }
 
@@ -89,7 +106,8 @@ pub struct RackArt<'a> {
 
 impl<'a> RackArt<'a> {
     /// Prepares the front view of `rack` with faces `width` columns wide and the sample
-    /// status. Devices without a valid model or a face for their place are left out.
+    /// status. Devices without a valid model are left out, and those without a face for their
+    /// place are drawn as an empty frame.
     #[must_use]
     pub fn new(rack: &'a Rack, catalog: &'a Catalog, width: usize, label: LabelRow) -> Self {
         let devices: Vec<DeviceArt> = rack
@@ -101,9 +119,10 @@ impl<'a> RackArt<'a> {
             })
             .filter_map(|device| {
                 let model = catalog.model(&device.model).ok()?;
-                let face = model.faces.normal.as_ref()?;
+                let face =
+                    model.faces.normal.as_ref().map(|face| (face, FaceLayout::new(face, width)));
                 let units = device.units(model, rack.units);
-                Some(DeviceArt::sample(device, model, face, FaceLayout::new(face, width), units))
+                Some(DeviceArt::sample(device, model, face, units))
             })
             .collect();
         let mut art = Self::from_devices(u16::from(rack.units), width, devices, label);
@@ -111,12 +130,12 @@ impl<'a> RackArt<'a> {
         for device in &rack.devices {
             let Placement::Strip { side, .. } = device.placement else { continue };
             let Ok(model) = catalog.model(&device.model) else { continue };
-            let Some(face) = &model.faces.strip else { continue };
             let units = device.units(model, rack.units);
             // The frame takes the first and last row.
             let height = art.map.span(units).len().saturating_sub(2);
-            let layout = FaceLayout::stretched(face, STRIP_WIDTH, height);
-            let strip = DeviceArt::sample(device, model, face, layout, units);
+            let face = model.faces.strip.as_ref();
+            let face = face.map(|face| (face, FaceLayout::stretched(face, STRIP_WIDTH, height)));
+            let strip = DeviceArt::sample(device, model, face, units);
             match seen_from_front(side, device.face) {
                 Side::Left => art.left.push(strip),
                 Side::Right => art.right.push(strip),
@@ -201,8 +220,8 @@ impl RackView<'_> {
         let rows = self.art.map.span(strip.units);
         let y = u16::try_from(rows.start).unwrap_or(u16::MAX);
         let height = u16::try_from(rows.len()).unwrap_or(u16::MAX);
-        let panel = strip.panel(self.numbers);
-        panel.render(Rect { x, y, width: panel.width(), height }, buf);
+        let width = u16::try_from(STRIP_WIDTH + 2).unwrap_or(u16::MAX);
+        strip.render(self.numbers, true, Rect { x, y, width, height }, buf);
     }
 
     /// Draws the whole rack into `buf`, a buffer of the view's size.
@@ -238,8 +257,10 @@ impl RackView<'_> {
                     }
                 }
                 RowKind::Device { index, row: 0 } => {
-                    let panel = self.art.devices[index].panel(self.numbers);
-                    panel.render(Rect { y, height: panel.height(), ..inside }, buf);
+                    let device = &self.art.devices[index];
+                    let rows = self.art.map.span(device.units).len();
+                    let height = u16::try_from(rows).unwrap_or(u16::MAX);
+                    device.render(self.numbers, false, Rect { y, height, ..inside }, buf);
                 }
                 RowKind::Device { .. } => {}
             }
@@ -276,6 +297,7 @@ mod tests {
 
     use super::*;
     use crate::ui::text::plain;
+    use crate::ui::theme::PANEL;
 
     /// Models for the test racks, as file path and contents.
     const MODELS: &[(&str, &str)] = &[
@@ -311,6 +333,9 @@ mod tests {
                     """#
                   legend { p power; ~ fill } }"##},
         ),
+        ("x/plain.kdl", r#"model { name "Plain"; kind "server" }"#),
+        ("x/blank.kdl", r#"model { name "Blank"; kind "blank"; ears "screws" }"#),
+        ("x/bare.kdl", r#"model { name "Bare"; kind "pdu"; mount "side"; height 2 }"#),
     ];
 
     /// Builds the view of a 4-unit rack of `devices`, with faces 6 columns wide, for `use_view`.
@@ -404,5 +429,27 @@ mod tests {
                 }
             }
         });
+    }
+
+    #[test]
+    fn draws_devices_without_a_face_as_empty_frames() {
+        let devices = r#"
+            device "srv" model="x/plain" u=4
+            device "cover" model="x/blank" u=2
+            device "pdu" model="x/bare" mount="left" u=3"#;
+        let rows = [
+            "🭽▔▔▔▔▔🭾  4 ┊┓ srv  ┏┊  4",
+            "▏pdu  ▕    ┊┛      ┗┊   ",
+            "▏     ▕  3 ┊·┊    ┊·┊  3",
+            "🭼▁▁▁▁▁🭿    ┊·┊    ┊·┊   ",
+            "         2 ┊⊕      ⊕┊  2",
+            "           ┊⊕      ⊕┊   ",
+            "         1 ┊·┊    ┊·┊  1",
+            "           ┊·┊    ┊·┊   ",
+        ];
+        let buf = draw(devices);
+        assert_eq!(plain(&buf), rows);
+        // The panels are tinted like any device, so they don't read as free space.
+        assert!([(16, 0), (16, 5), (3, 2)].iter().all(|&at| buf[at].bg == PANEL));
     }
 }

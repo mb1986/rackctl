@@ -7,7 +7,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::widgets::Widget;
 
 use super::FaceView;
-use crate::ui::theme::{EAR, PANEL, UNDERLINE};
+use crate::ui::theme::{EAR, PANEL, TEXT, UNDERLINE};
 
 /// A device's panel: its face between two ears and underlined, or a strip's face in a thin
 /// frame.
@@ -53,12 +53,54 @@ impl Widget for Panel<'_> {
     }
 }
 
+/// The panel of a device whose model has no face: its frame and tint, with its name.
+#[derive(Clone, Copy)]
+pub struct BlankPanel<'a> {
+    pub ears: Ears,
+    pub strip: bool,
+    pub name: Option<&'a str>,
+}
+
+impl Widget for BlankPanel<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        if area.width < 2 || area.height == 0 {
+            return;
+        }
+        let framed = self.strip && area.height >= 2;
+        let inside = if framed {
+            Rect { x: area.x + 1, y: area.y + 1, width: area.width - 2, height: area.height - 2 }
+        } else {
+            Rect { x: area.x + 1, width: area.width - 2, ..area }
+        };
+        let text = Style::new().fg(TEXT).bg(PANEL);
+        for y in inside.top()..inside.bottom() {
+            buf.set_string(inside.x, y, " ".repeat(usize::from(inside.width)), text);
+        }
+        if let Some(name) = self.name.filter(|_| !inside.is_empty()) {
+            // A strip's name fills its narrow row; a device's starts one column in.
+            let x = if self.strip { inside.x } else { inside.x + 1 };
+            let room = usize::from(inside.right().saturating_sub(x));
+            buf.set_stringn(x, inside.y, name, room, text);
+        }
+        if framed {
+            frame_strip(area, buf);
+        } else if !self.strip {
+            frame_ears(self.ears, area, buf);
+        }
+    }
+}
+
 /// Draws a strip's face in a thin frame.
 fn render_strip(face: FaceView<'_>, area: Rect, buf: &mut Buffer) {
     face.render(
         Rect { x: area.x + 1, y: area.y + 1, width: area.width - 2, height: area.height - 2 },
         buf,
     );
+    frame_strip(area, buf);
+}
+
+/// Draws the thin frame of a strip.
+fn frame_strip(area: Rect, buf: &mut Buffer) {
     let style = Style::new().fg(EAR).bg(PANEL);
     let inside = usize::from(area.width - 2);
     buf.set_string(area.x, area.y, format!("🭽{}🭾", "▔".repeat(inside)), style);
@@ -72,10 +114,15 @@ fn render_strip(face: FaceView<'_>, area: Rect, buf: &mut Buffer) {
 /// Draws a face between two ears, underlined on its last row.
 fn render_ears(face: FaceView<'_>, area: Rect, buf: &mut Buffer) {
     face.render(Rect { x: area.x + 1, width: area.width - 2, ..area }, buf);
+    frame_ears(face.model.ears, area, buf);
+}
+
+/// Draws a device's ears and the line under its last row.
+fn frame_ears(ears_style: Ears, area: Rect, buf: &mut Buffer) {
     let style = Style::new().fg(EAR).bg(PANEL);
     let rows = usize::from(area.height);
     for (row, y) in (area.top()..area.bottom()).enumerate() {
-        let (left, right) = ears(face.model.ears, row, rows);
+        let (left, right) = ears(ears_style, row, rows);
         for (x, ear) in [(area.left(), left), (area.right() - 1, right)] {
             if let Some(cell) = buf.cell_mut((x, y)) {
                 cell.set_char(ear).set_style(style);
