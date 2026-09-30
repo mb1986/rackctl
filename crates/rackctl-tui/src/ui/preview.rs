@@ -7,7 +7,7 @@ use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::widgets::Widget;
 
-use crate::ui::art::{FaceLayout, FaceView, Panel, SAMPLE_AMPS, Sample, sample_looks};
+use crate::ui::art::{FaceLayout, Sample, sample_looks};
 use crate::ui::rack::{DeviceArt, FACE_WIDTH, RackArt, RackView};
 use crate::ui::rowmap::LabelRow;
 use crate::ui::theme::RACK;
@@ -37,23 +37,15 @@ pub fn preview(model: &Model, face: &Face, sample: Sample, numbers: bool, name: 
         return buf;
     }
     let units = model.height.map_or(STRIP_UNITS, u16::from);
+    let rows = units * 2;
     // The frame takes the first and last row.
-    let layout = FaceLayout::stretched(face, STRIP_WIDTH, usize::from(units * 2 - 2));
-    let panel = Panel {
-        face: FaceView {
-            model,
-            face,
-            layout: &layout,
-            name,
-            amps: SAMPLE_AMPS,
-            looks: &looks,
-            numbers,
-        },
-    };
-    let mut buf = Buffer::empty(Rect::new(0, 0, panel.width() + 3, panel.height()));
-    for row in (0..panel.height()).step_by(2) {
+    let layout = FaceLayout::stretched(face, STRIP_WIDTH, usize::from(rows - 2));
+    let strip = DeviceArt::new(name, model, face, layout, looks, UnitRange::new(1, units));
+    let width = u16::try_from(STRIP_WIDTH + 2).unwrap_or(u16::MAX);
+    let mut buf = Buffer::empty(Rect::new(0, 0, width + 3, rows));
+    for row in (0..rows).step_by(2) {
         buf.set_string(0, row, format!("{:>2} ", units - row / 2), Style::new().fg(RACK));
     }
-    panel.render(Rect { x: 3, ..buf.area }, &mut buf);
+    strip.render(numbers, true, Rect { x: 3, width, ..buf.area }, &mut buf);
     buf
 }

@@ -74,7 +74,7 @@ impl<'a> DeviceArt<'a> {
     }
 
     /// Draws the device over `area`: its face in a frame, or the frame alone.
-    fn render(&self, numbers: bool, strip: bool, area: Rect, buf: &mut Buffer) {
+    pub(crate) fn render(&self, numbers: bool, strip: bool, area: Rect, buf: &mut Buffer) {
         let Some(face) = &self.face else {
             let named = !matches!(self.model.kind, Kind::Blank | Kind::Shelf);
             let name = named.then_some(self.name);
