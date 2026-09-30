@@ -7,6 +7,7 @@ use miette::SourceSpan;
 use strum::{EnumString, IntoStaticStr, VariantNames};
 
 use crate::kdl_reader::{NodeReader, Problem, Spanned, span_of};
+use crate::wiring::PatchSide;
 
 /// The legend of a model's faces: one entry per key character.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -654,6 +655,12 @@ fn parse_group(text: &str) -> Result<String, String> {
     if let Some(part) = part {
         return Err(format!("`{text}` cannot name a group: the wiring uses `{part}`"));
     }
+    let lower = text.to_ascii_lowercase();
+    if PatchSide::parse(&lower).is_some() {
+        return Err(format!(
+            "`{text}` cannot name a group: the wiring uses `{lower}` for a patch panel's side"
+        ));
+    }
     Ok(text.to_owned())
 }
 
@@ -828,7 +835,8 @@ mod tests {
                    o outlet type="" rating="1\n0A"
                    q text="A\tB"
                    r bay first=0 numbers="1"
-                   s port group="Psu""#
+                   s port group="Psu"
+                   t port group="Back""#
             ),
             [
                 "`order` must be `right`, `left`, `down` or `up`, optionally followed by a \
@@ -853,6 +861,7 @@ mod tests {
                 "a text must not contain control characters",
                 "`first` has no effect next to `numbers`",
                 "`Psu` cannot name a group: the wiring uses `psu`",
+                "`Back` cannot name a group: the wiring uses `back` for a patch panel's side",
             ]
         );
     }
