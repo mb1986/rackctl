@@ -27,8 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Device faces: catalog models describe their front panel as a picture with a legend, with
   checked numbering of bays, PSUs, NICs, ports and outlets.
 - Device catalog with selected models of Dell, Cisco, APC, HPE and Ubiquiti hardware, plus
-  generic models. Models are read from the built-in catalog and the user's catalog, and each model
-  file is loaded only when it is first used.
+  generic models: a 24-port patch panel and 1U, 2U and 4U blank panels. Models are read from
+  the built-in catalog and the user's catalog, and each model file is loaded only when it is
+  first used.
 - Rack layout loading from `rack.kdl`: devices in the rack's unit slots and vertical strips
   beside the rack, on the front or the rear.
 - Checks with precise error messages: unknown or misspelled nodes, properties and models,

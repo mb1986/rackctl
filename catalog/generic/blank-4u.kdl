@@ -1,0 +1,4 @@
+model {
+  name "Blank Panel 4U"
+  kind "blank"; height 4; depth "half"; ears "screws"
+}
