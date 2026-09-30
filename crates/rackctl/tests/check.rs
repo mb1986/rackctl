@@ -137,10 +137,14 @@ fn reports_problems_and_exits_with_code_2() {
         }"#,
     )
     .expect("write the rack file");
+    // Not checked while the rack has problems.
+    fs::write(dir.path().join("wiring.kdl"), "wiring { net ghost:1 b:nic1; }")
+        .expect("write the wiring");
 
     let output = check(&rack_file);
     assert!(stdout(&output).ends_with(&format!("rack     {}: 1 problem\n", rack_file.display())));
     assert!(stderr(&output).contains("`b` overlaps `a` on U2"));
+    assert!(!stderr(&output).contains("ghost"));
     assert_eq!(output.status.code(), Some(2));
 }
 

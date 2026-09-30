@@ -45,6 +45,12 @@ fn reports_an_endpoint_the_rack_does_not_have() {
         String::from_utf8_lossy(&output.stderr),
         "rackctl: unknown device `sg30`; did you mean `sg300`?\n"
     );
+
+    let output = trace(&golden_rack(), "srv01");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).starts_with("rackctl: `srv01` is not an endpoint")
+    );
 }
 
 #[test]

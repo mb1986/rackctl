@@ -122,6 +122,16 @@ mod tests {
     }
 
     #[test]
+    fn finds_an_endpoint_written_with_leading_zeros() {
+        let (_, rack, result) = resolve(WIRING);
+        let cabling = result.expect("valid wiring");
+        let catalog = Catalog::builtin();
+        let find = |text| cabling.find(text, &rack, &catalog).expect(text);
+        assert_eq!(find("pdu:08"), find("pdu:8"));
+        assert_eq!(find("srv01:psu01"), find("srv01:psu1"));
+    }
+
+    #[test]
     fn names_every_endpoint_so_that_it_is_found_again() {
         let (_, rack, result) = resolve(WIRING);
         assert_names_find_their_endpoints(&rack, &Catalog::builtin(), &result.expect("wiring"));

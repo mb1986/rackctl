@@ -113,6 +113,11 @@ mod tests {
         let error = load().expect_err("invalid wiring");
         let messages: Vec<_> = error.problems().iter().map(Problem::message).collect();
         assert_eq!(messages, ["`b:nic2` does not exist: `b` has NIC 1"]);
+
+        fs::remove_file(&wiring_file).expect("remove the wiring");
+        fs::create_dir(&wiring_file).expect("a directory in its place");
+        let error = load().expect_err("unreadable wiring");
+        assert!(error.problems()[0].message().starts_with("cannot read the file: "));
     }
 
     #[test]
