@@ -339,7 +339,7 @@ mod tests {
     ];
 
     /// Builds the view of a 4-unit rack of `devices`, with faces 6 columns wide, for `use_view`.
-    fn with_view<T>(devices: &str, use_view: impl FnOnce(RackView) -> T) -> T {
+    fn with_view<T>(devices: &str, label: LabelRow, use_view: impl FnOnce(RackView) -> T) -> T {
         let dir = tempfile::tempdir().expect("temporary directory");
         fs::create_dir(dir.path().join("x")).expect("model directory");
         for (path, text) in MODELS {
@@ -347,14 +347,19 @@ mod tests {
         }
         let catalog = Catalog::open(&[dir.path()]).expect("readable catalog");
         let rack = Rack::parse(&format!("rack \"r\" units=4 {{\n{devices}\n}}")).expect("rack");
-        let art = RackArt::new(&rack, &catalog, 6, LabelRow::Top);
+        let art = RackArt::new(&rack, &catalog, 6, label);
         use_view(RackView { art: &art, numbers: false, top: 0 })
     }
 
     /// Draws the whole of a 4-unit rack of `devices`.
-    #[expect(clippy::redundant_closure_for_method_calls, reason = "the method has one lifetime")]
     fn draw(devices: &str) -> Buffer {
-        with_view(devices, |view| view.canvas())
+        draw_labelled(devices, LabelRow::Top)
+    }
+
+    /// Draws the whole of a 4-unit rack of `devices`, with unit numbers on `label` rows.
+    #[expect(clippy::redundant_closure_for_method_calls, reason = "the method has one lifetime")]
+    fn draw_labelled(devices: &str, label: LabelRow) -> Buffer {
+        with_view(devices, label, |view| view.canvas())
     }
 
     const DEVICES: &str = r#"
@@ -375,6 +380,21 @@ mod tests {
             "   ┊┛      ┗┊   ",
         ];
         assert_eq!(plain(&draw(DEVICES)), rows);
+    }
+
+    #[test]
+    fn puts_unit_numbers_on_the_bottom_row() {
+        let rows = [
+            "   ┊┓● a   ┏┊   ",
+            " 4 ┊┛      ┗┊  4",
+            "   ┊·┊    ┊·┊   ",
+            " 3 ┊·┊    ┊·┊  3",
+            "   ┊┓● b   ┏┊   ",
+            " 2 ┊┃      ┃┊  2",
+            "   ┊┃      ┃┊   ",
+            " 1 ┊┛      ┗┊  1",
+        ];
+        assert_eq!(plain(&draw_labelled(DEVICES, LabelRow::Bottom)), rows);
     }
 
     #[test]
@@ -408,7 +428,7 @@ mod tests {
     #[test]
     fn shows_the_rows_from_top_that_fit_the_area() {
         let devices = format!("{DEVICES}\ndevice \"s\" model=\"x/strip\" mount=\"left\" u=3");
-        with_view(&devices, |view| {
+        with_view(&devices, LabelRow::Top, |view| {
             let canvas = view.canvas();
             for (top, area) in [
                 (2, Rect::new(2, 1, 60, 4)),
