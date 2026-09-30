@@ -215,8 +215,8 @@ enum Mistake {
     NoSide,
     /// A bare number on a device without a main list.
     NoMainList,
-    /// One side in the middle of a path.
-    OneSide,
+    /// A patch-panel port without both sides in the middle of a path.
+    NotBothSides,
     /// A word that is not a side, on a patch panel.
     NotASide(String),
     /// A side on a device other than a patch panel.
@@ -234,7 +234,7 @@ impl Mistake {
             Self::NoMainList => {
                 format!("`{written}` needs an endpoint name: a {kind} has no numbered main list")
             }
-            Self::OneSide => format!(
+            Self::NotBothSides => format!(
                 "in the middle of a path, a patch port gives both sides, such as `{id}:b-f14`"
             ),
             Self::NotASide(word) => {
@@ -258,14 +258,16 @@ fn wanted(name: &EndpointName, kind: Kind, place: Place) -> Result<Wanted<'_>, M
             EndpointName::Main(number) if place == Place::Alone => {
                 Ok(wanted(Part::Port, None, Some(*number), None))
             }
+            EndpointName::Main(_) if place == Place::Middle => Err(Mistake::NotBothSides),
             EndpointName::Main(_) => Err(Mistake::NoSide),
             EndpointName::Named { word, number } => match PatchSide::parse(word) {
-                Some(_) if place == Place::Middle => Err(Mistake::OneSide),
+                Some(_) if place == Place::Middle => Err(Mistake::NotBothSides),
                 Some(side) => Ok(wanted(Part::Port, None, *number, Some((side, side)))),
                 None => match endpoint_part(word) {
                     Some(Part::Port) if place == Place::Alone => {
                         Ok(wanted(Part::Port, None, *number, None))
                     }
+                    Some(Part::Port) if place == Place::Middle => Err(Mistake::NotBothSides),
                     Some(Part::Port) => Err(Mistake::NoSide),
                     Some(part) => Ok(wanted(part, None, *number, None)),
                     None => Err(Mistake::NotASide(word.clone())),
@@ -495,7 +497,9 @@ pub(super) mod tests {
                 net srv02:nic2 patch:b4 sw:5
                 net srv02:nic3 srv01:nic4 sw:6
                 net sw:b7 srv02:nic4
-                net patch:x1 sw:8"},
+                net patch:x1 sw:8
+                net sw:11 patch:9 sw:12
+                net sw:13 patch:port10 sw:14"},
             &[
                 (
                     "`patch:3` needs a side: a patch-panel port is written such as `patch:b14` \
@@ -510,6 +514,16 @@ pub(super) mod tests {
                 ("only a patch-panel port can sit in the middle of a path", "srv01:nic4"),
                 ("only patch-panel ports have sides: `sw` is a switch", "sw:b7"),
                 ("a patch side is `b`, `back`, `f` or `front`, found `x`", "patch:x1"),
+                (
+                    "in the middle of a path, a patch port gives both sides, such as \
+                     `patch:b-f14`",
+                    "patch:9",
+                ),
+                (
+                    "in the middle of a path, a patch port gives both sides, such as \
+                     `patch:b-f14`",
+                    "patch:port10",
+                ),
             ],
         );
     }
