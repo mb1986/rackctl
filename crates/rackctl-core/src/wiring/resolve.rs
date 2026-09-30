@@ -221,6 +221,8 @@ enum Mistake {
     NotASide(String),
     /// A side on a device other than a patch panel.
     NotAPatchPanel,
+    /// A part name with capitals, such as `PSU`, and the name written correctly.
+    Capitalised { word: String, fixed: String },
 }
 
 impl Mistake {
@@ -243,8 +245,19 @@ impl Mistake {
             Self::NotAPatchPanel => {
                 format!("only patch-panel ports have sides: `{id}` is a {kind}")
             }
+            Self::Capitalised { word, fixed } => format!(
+                "`{written}` names the part `{word}`: part names are lowercase, such as \
+                 `{id}:{fixed}`"
+            ),
         }
     }
+}
+
+/// Returns the mistake of a part name written with capitals, such as `PSU1`.
+fn capitalised(word: &str, number: Option<u16>) -> Option<Mistake> {
+    let part: &str = endpoint_part(&word.to_ascii_lowercase())?.into();
+    let fixed = number.map_or_else(|| part.to_owned(), |number| format!("{part}{number}"));
+    Some(Mistake::Capitalised { word: word.to_owned(), fixed })
 }
 
 /// Reads what `name`, written at `place`, asks for on a device of `kind`.
@@ -270,7 +283,8 @@ fn wanted(name: &EndpointName, kind: Kind, place: Place) -> Result<Wanted<'_>, M
                     Some(Part::Port) if place == Place::Middle => Err(Mistake::NotBothSides),
                     Some(Part::Port) => Err(Mistake::NoSide),
                     Some(part) => Ok(wanted(part, None, *number, None)),
-                    None => Err(Mistake::NotASide(word.clone())),
+                    None => Err(capitalised(word, *number)
+                        .unwrap_or_else(|| Mistake::NotASide(word.clone()))),
                 },
             },
         };
@@ -285,6 +299,11 @@ fn wanted(name: &EndpointName, kind: Kind, place: Place) -> Result<Wanted<'_>, M
         }
         EndpointName::Named { word, number } => {
             let part = endpoint_part(word);
+            if part.is_none()
+                && let Some(mistake) = capitalised(word, *number)
+            {
+                return Err(mistake);
+            }
             let group = part.is_none().then_some(word.as_str());
             Ok(wanted(part.unwrap_or(Part::Port), group, *number, None))
         }
@@ -471,7 +490,9 @@ pub(super) mod tests {
                 net router:6 sw:4
                 net sw:XG5 router:1
                 mgmt srv01:outlet1 sw:9
-                mgmt srv02:mgmt2 sw:10"},
+                mgmt srv02:mgmt2 sw:10
+                power pdu:3 srv02:PSU1
+                mgmt srv01:Mgmt sw:11"},
             &[
                 ("`pdu:25` does not exist: `pdu` has outlets 1-24", "pdu:25"),
                 ("`srv01:psu3` does not exist: `srv01` has PSUs 1-2", "srv01:psu3"),
@@ -485,6 +506,16 @@ pub(super) mod tests {
                     "srv01:outlet1",
                 ),
                 ("`srv02:mgmt2` does not exist: `srv02` has management port 1", "srv02:mgmt2"),
+                (
+                    "`srv02:PSU1` names the part `PSU`: part names are lowercase, such as \
+                     `srv02:psu1`",
+                    "srv02:PSU1",
+                ),
+                (
+                    "`srv01:Mgmt` names the part `Mgmt`: part names are lowercase, such as \
+                     `srv01:mgmt`",
+                    "srv01:Mgmt",
+                ),
             ],
         );
     }
