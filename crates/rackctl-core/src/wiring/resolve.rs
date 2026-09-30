@@ -94,6 +94,17 @@ impl Wiring {
                 continue;
             }
             for (pair, written) in found.windows(2).zip(path.endpoints.windows(2)) {
+                if pair[0].socket == pair[1].socket {
+                    let (noun, _) = part_names(pair[1].part);
+                    let message =
+                        format!("a cable cannot connect {} to itself", with_article(noun));
+                    problems.push(
+                        Problem::new(message, written[1].span)
+                            .with_label("the same")
+                            .with_label_at(written[0].span, "as this"),
+                    );
+                    continue;
+                }
                 let ends = [
                     End { socket: pair[0].socket, side: pair[0].sides.map(|(_, exit)| exit) },
                     End { socket: pair[1].socket, side: pair[1].sides.map(|(entry, _)| entry) },
@@ -520,6 +531,21 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn reports_a_cable_from_an_endpoint_to_itself() {
+        assert_reported(
+            indoc! {"
+                net patch:b5 patch:f5
+                net sw:2 sw:2
+                mgmt srv01:nic1 srv01:nic1"},
+            &[
+                ("a cable cannot connect a port to itself", "patch:f5"),
+                ("a cable cannot connect a port to itself", "sw:2"),
+                ("a cable cannot connect a NIC to itself", "srv01:nic1"),
+            ],
+        );
+    }
+
+    #[test]
     fn reports_endpoints_used_twice() {
         assert_reported(
             indoc! {"
@@ -527,12 +553,10 @@ pub(super) mod tests {
                 power pdu:1 srv02:psu1
                 net srv01:nic1 patch:b1
                 net srv02:nic1 patch:back1
-                net sw:1 patch:f1
-                net sw:2 sw:2"},
+                net sw:1 patch:f1"},
             &[
                 ("`pdu:1` is already connected", "pdu:1"),
                 ("`patch:back1` is already connected at the back", "patch:back1"),
-                ("`sw:2` is already connected", "sw:2"),
             ],
         );
 
