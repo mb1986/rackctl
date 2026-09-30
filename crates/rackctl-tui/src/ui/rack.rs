@@ -17,10 +17,13 @@ pub const FACE_WIDTH: usize = 48;
 /// Columns for a unit number and its space, on each side.
 const LABEL: u16 = 3;
 
+/// Screen rows per rack unit; compact mode, with one, comes with compact faces.
+const ROWS_PER_UNIT: u16 = 2;
+
 /// Draws the front view of `rack` at the default size, with the sample status.
 #[must_use]
 pub fn front_view(rack: &Rack, catalog: &Catalog) -> Buffer {
-    let art = RackArt::new(rack, catalog, FACE_WIDTH, 2, LabelRow::default());
+    let art = RackArt::new(rack, catalog, FACE_WIDTH, LabelRow::default());
     RackView { art: &art, numbers: false, top: 0 }.canvas()
 }
 
@@ -88,13 +91,7 @@ impl<'a> RackArt<'a> {
     /// Prepares the front view of `rack` with faces `width` columns wide and the sample
     /// status. Devices without a valid model or a face for their place are left out.
     #[must_use]
-    pub fn new(
-        rack: &'a Rack,
-        catalog: &'a Catalog,
-        width: usize,
-        rows_per_unit: u16,
-        label: LabelRow,
-    ) -> Self {
+    pub fn new(rack: &'a Rack, catalog: &'a Catalog, width: usize, label: LabelRow) -> Self {
         let devices: Vec<DeviceArt> = rack
             .devices
             .iter()
@@ -109,17 +106,15 @@ impl<'a> RackArt<'a> {
                 Some(DeviceArt::sample(device, model, face, FaceLayout::new(face, width), units))
             })
             .collect();
-        let mut art =
-            Self::from_devices(u16::from(rack.units), width, devices, rows_per_unit, label);
+        let mut art = Self::from_devices(u16::from(rack.units), width, devices, label);
 
         for device in &rack.devices {
             let Placement::Strip { side, .. } = device.placement else { continue };
             let Ok(model) = catalog.model(&device.model) else { continue };
             let Some(face) = &model.faces.strip else { continue };
             let units = device.units(model, rack.units);
-            // The frame takes the first and last row; a shorter strip has none.
-            let rows = art.map.span(units).len();
-            let height = if rows >= 2 { rows - 2 } else { rows };
+            // The frame takes the first and last row.
+            let height = art.map.span(units).len().saturating_sub(2);
             let layout = FaceLayout::stretched(face, STRIP_WIDTH, height);
             let strip = DeviceArt::sample(device, model, face, layout, units);
             match seen_from_front(side, device.face) {
@@ -135,12 +130,11 @@ impl<'a> RackArt<'a> {
         units: u16,
         width: usize,
         devices: Vec<DeviceArt<'a>>,
-        rows_per_unit: u16,
         label: LabelRow,
     ) -> Self {
         let slots: Vec<(usize, UnitRange)> =
             devices.iter().enumerate().map(|(index, device)| (index, device.units)).collect();
-        let map = RowMap::new(units, &slots, rows_per_unit, label);
+        let map = RowMap::new(units, &slots, ROWS_PER_UNIT, label);
         Self { width, map, devices, left: Vec::new(), right: Vec::new() }
     }
 
@@ -317,19 +311,10 @@ mod tests {
                     """#
                   legend { p power; ~ fill } }"##},
         ),
-        (
-            "x/short.kdl",
-            indoc! {r##"
-                model { name "Short"; kind "pdu"; mount "side"; height 1
-                  face strip=#true #"""
-                    p
-                    """#
-                  legend { p power } }"##},
-        ),
     ];
 
     /// Builds the view of a 4-unit rack of `devices`, with faces 6 columns wide, for `use_view`.
-    fn with_view<T>(devices: &str, rows_per_unit: u16, use_view: impl FnOnce(RackView) -> T) -> T {
+    fn with_view<T>(devices: &str, use_view: impl FnOnce(RackView) -> T) -> T {
         let dir = tempfile::tempdir().expect("temporary directory");
         fs::create_dir(dir.path().join("x")).expect("model directory");
         for (path, text) in MODELS {
@@ -337,14 +322,14 @@ mod tests {
         }
         let catalog = Catalog::open(&[dir.path()]).expect("readable catalog");
         let rack = Rack::parse(&format!("rack \"r\" units=4 {{\n{devices}\n}}")).expect("rack");
-        let art = RackArt::new(&rack, &catalog, 6, rows_per_unit, LabelRow::Top);
+        let art = RackArt::new(&rack, &catalog, 6, LabelRow::Top);
         use_view(RackView { art: &art, numbers: false, top: 0 })
     }
 
     /// Draws the whole of a 4-unit rack of `devices`.
     #[expect(clippy::redundant_closure_for_method_calls, reason = "the method has one lifetime")]
     fn draw(devices: &str) -> Buffer {
-        with_view(devices, 2, |view| view.canvas())
+        with_view(devices, |view| view.canvas())
     }
 
     const DEVICES: &str = r#"
@@ -398,7 +383,7 @@ mod tests {
     #[test]
     fn shows_the_rows_from_top_that_fit_the_area() {
         let devices = format!("{DEVICES}\ndevice \"s\" model=\"x/strip\" mount=\"left\" u=3");
-        with_view(&devices, 2, |view| {
+        with_view(&devices, |view| {
             let canvas = view.canvas();
             for (top, area) in [
                 (2, Rect::new(2, 1, 60, 4)),
@@ -419,13 +404,5 @@ mod tests {
                 }
             }
         });
-    }
-
-    #[test]
-    fn draws_a_strip_of_one_row_without_its_frame() {
-        let rows = with_view(r#"device "s" model="x/short" mount="left""#, 1, |view| {
-            plain(&view.canvas())
-        });
-        assert_eq!(rows[3], " ●       1 ┊·┊    ┊·┊  1");
     }
 }

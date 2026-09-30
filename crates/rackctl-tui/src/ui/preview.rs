@@ -27,7 +27,7 @@ pub fn preview(model: &Model, face: &Face, sample: Sample, numbers: bool, name: 
         let layout = FaceLayout::new(face, FACE_WIDTH);
         let device = DeviceArt::new(name, model, face, layout, looks, units);
         let top = units.highest() + 1;
-        let art = RackArt::from_devices(top, FACE_WIDTH, vec![device], 2, LabelRow::Top);
+        let art = RackArt::from_devices(top, FACE_WIDTH, vec![device], LabelRow::Top);
         let view = RackView { art: &art, numbers, top: 0 };
         // The device with an empty unit above and below it.
         let rows = art.map().span(UnitRange::new(UNIT - 1, top)).len();

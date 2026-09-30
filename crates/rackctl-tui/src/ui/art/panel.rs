@@ -141,6 +141,35 @@ mod tests {
     }
 
     #[test]
+    fn frames_a_strip_only_when_it_has_two_rows_for_the_frame() {
+        let text = r##"model { name "S"; kind "pdu"; mount "side"
+            face strip=#true #"""
+            p
+            """#
+            legend { p power } }"##;
+        let model = Model::parse("x/s", text).expect("valid model");
+        let face = model.faces.strip.as_ref().expect("strip face");
+        let layout = FaceLayout::stretched(face, 4, 1);
+        let looks = vec![Look { state: State::On, tone: Tone::Good }; face.elements().len()];
+        let view = FaceView {
+            model: &model,
+            face,
+            layout: &layout,
+            name: "",
+            amps: "",
+            looks: &looks,
+            numbers: false,
+        };
+        let draw = |height| {
+            let mut buf = Buffer::empty(Rect::new(0, 0, 6, height));
+            Panel { face: view }.render(buf.area, &mut buf);
+            plain(&buf)
+        };
+        assert_eq!(draw(3), ["🭽▔▔▔▔🭾", "▏●   ▕", "🭼▁▁▁▁🭿"]);
+        assert_eq!(draw(1), [" ●    "]);
+    }
+
+    #[test]
     fn frames_the_face_with_ears() {
         assert_eq!(plain(&paint("height 2", "p\n\n\n")), ["┓●   ┏", "┃    ┃", "┃    ┃", "┛    ┗"]);
         assert_eq!(plain(&paint("", "p\n")), ["┓●   ┏", "┛    ┗"]);
