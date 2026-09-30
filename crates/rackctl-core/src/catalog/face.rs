@@ -356,7 +356,7 @@ fn link_number_fields(
         };
         let left = numbered_at(field.column.checked_sub(1));
         let right = numbered_at(Some(field.column + field.width));
-        let gap = legend.get(field.key).map_or(0, |entry| entry.gap);
+        let gap = legend.get(field.key).map_or(0, |entry| entry.gap.chars().count());
         let problem = match (left, right) {
             (Some(_), Some(_)) => Some("this number field touches numbered elements on both sides"),
             (None, None) => Some("a number field must touch a bay, port or other numbered element"),
@@ -371,7 +371,10 @@ fn link_number_fields(
         }
         if field.width <= gap {
             problems.push(Problem::new(
-                format!("this number field has no room for a number besides its `gap={gap}`"),
+                format!(
+                    "this number field has no room for a number besides its gap of {}",
+                    plural(gap, "column")
+                ),
                 span,
             ));
         }
@@ -962,7 +965,7 @@ mod tests {
             [
                 (touch, "#"),
                 ("this number field touches numbered elements on both sides", "##"),
-                ("this number field has no room for a number besides its `gap=1`", "#"),
+                ("this number field has no room for a number besides its gap of 1 column", "#"),
                 (touch, "##"),
                 (touch, "#"),
             ]

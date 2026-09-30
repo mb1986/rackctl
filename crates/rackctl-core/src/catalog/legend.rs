@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use kdl::{KdlDocument, KdlEntry, KdlIdentifier, KdlNode};
 use miette::SourceSpan;
 use strum::{EnumString, IntoStaticStr, VariantNames};
+use unicode_width::UnicodeWidthChar;
 
 use crate::kdl_reader::{NodeReader, Problem, Spanned, span_of};
 use crate::wiring::PatchSide;
@@ -68,8 +69,8 @@ pub struct LegendEntry {
     /// How a text or number part is placed in its run, when the entry chooses. Text is
     /// placed on the left by default, and a number towards the element it belongs to.
     pub align: Option<Align>,
-    /// The blank columns a number part keeps next to its element.
-    pub gap: usize,
+    /// What a number part keeps next to its element: blanks for `gap=N`, or the text given.
+    pub gap: String,
     /// The socket type of an outlet, for example `C13`.
     pub outlet_type: Option<String>,
     /// The rated current of an outlet, for example `10A`.
@@ -367,7 +368,11 @@ fn read_entry(node: &KdlNode, key: char, problems: &mut Vec<Problem>) -> Option<
         }
     }
     let align = if part.kind() == PartKind::Text { reader.opt_enum("align") } else { None };
-    let gap = if part == Part::Number { reader.opt_int("gap").unwrap_or(0) } else { 0 };
+    let gap = if part == Part::Number {
+        read_gap(node, &mut reader, &mut invalid)
+    } else {
+        String::new()
+    };
     let numbering = if part.kind() == PartKind::List {
         read_numbering(node, &mut reader, part, &mut invalid)
     } else {
@@ -487,6 +492,24 @@ fn text_value(what: &str, value: &str) -> Result<String, String> {
 
 /// Invalid option values: where each one is and why it is invalid.
 type Invalid = Vec<(SourceSpan, String)>;
+
+/// Reads the `gap` of a number part: a number of blank columns, or the text to draw.
+fn read_gap(node: &KdlNode, reader: &mut NodeReader<'_, '_>, invalid: &mut Invalid) -> String {
+    if node.entry("gap").is_some_and(|entry| entry.value().is_string()) {
+        return parsed(node, reader, "gap", parse_gap, invalid)
+            .map_or_else(String::new, |gap| gap.value);
+    }
+    " ".repeat(reader.opt_int::<u8>("gap").map_or(0, usize::from))
+}
+
+/// Checks the text of a `gap`: characters of one column each.
+fn parse_gap(text: &str) -> Result<String, String> {
+    check_text("`gap`", text)?;
+    if let Some(wide) = text.chars().find(|c| c.width() != Some(1)) {
+        return Err(format!("every character of `gap` must be one column wide, found `{wide}`"));
+    }
+    Ok(text.to_owned())
+}
 
 /// Reads the numbering options of a list part.
 fn read_numbering(
@@ -699,7 +722,9 @@ mod tests {
         assert_eq!(entry(r#"t text="APC""#).text.as_deref(), Some("APC"));
         assert_eq!(entry(r#"a amps align="right""#).align, Some(Align::Right));
         let number = entry(r##""#" number gap=1"##);
-        assert_eq!((number.part, number.gap, number.align), (Part::Number, 1, None));
+        assert_eq!((number.part, number.gap.as_str(), number.align), (Part::Number, " ", None));
+        assert_eq!(entry(r##""#" number gap="[""##).gap, "[");
+        assert_eq!(entry(r##""#" number"##).gap, "");
         assert_eq!(entry("~ fill").part, Part::Fill);
         assert_eq!(entry("* space").part, Part::Space);
     }
@@ -836,7 +861,10 @@ mod tests {
                    q text="A\tB"
                    r bay first=0 numbers="1"
                    s port group="Psu"
-                   t port group="Back""#
+                   t port group="Back"
+                   u number gap="中"
+                   v number gap=""
+                   w number gap=#true"#
             ),
             [
                 "`order` must be `right`, `left`, `down` or `up`, optionally followed by a \
@@ -862,6 +890,9 @@ mod tests {
                 "`first` has no effect next to `numbers`",
                 "`Psu` cannot name a group: the wiring uses `psu`",
                 "`Back` cannot name a group: the wiring uses `back` for a patch panel's side",
+                "every character of `gap` must be one column wide, found `中`",
+                "`gap` must not be empty",
+                "`gap` must be a whole number, found #true",
             ]
         );
     }

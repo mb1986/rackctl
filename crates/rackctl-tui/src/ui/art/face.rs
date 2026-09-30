@@ -124,16 +124,15 @@ impl FaceView<'_> {
         let Some(numbered) = field.number_of.map(|at| &self.face.elements()[at]) else {
             return " ".repeat(field.width);
         };
-        let gap = entry.map_or(0, |entry| entry.gap);
-        let room = field.width.saturating_sub(gap);
+        let gap = entry.map_or("", |entry| entry.gap.as_str());
+        let room = field.width.saturating_sub(gap.chars().count());
         let number = numbered.number.map(|number| number.to_string()).unwrap_or_default();
         // Aligned towards its element by default.
         let left_of = numbered.column > field.column;
         let lean = if left_of { Align::Right } else { Align::Left };
         let label =
             fit(last(&number, room), room, entry.and_then(|entry| entry.align).unwrap_or(lean));
-        let gap = " ".repeat(gap);
-        if left_of { label + &gap } else { gap + &label }
+        if left_of { label + gap } else { gap.to_owned() + &label }
     }
 }
 
@@ -246,6 +245,13 @@ mod tests {
         let buf = paint(&model, 7, false, |_| GOOD);
         assert_eq!(plain(&buf)[0], "0 ■ ■ 1");
         assert_eq!(buf[(0, 0)].fg, LITERAL);
+    }
+
+    #[test]
+    fn draws_the_text_of_a_gap_between_a_number_and_its_element() {
+        let legend = r##""#" number gap="["; "$" number gap="]"; b bay first=10; ~ fill"##;
+        let model = server(["##b] [b$$", "~"], "bays 2", legend);
+        assert_eq!(plain(&paint(&model, 9, false, |_| GOOD))[0], "0[■] [■]1");
     }
 
     #[test]
