@@ -9,8 +9,8 @@ use miette::SourceSpan;
 use strum::{EnumString, IntoStaticStr, VariantNames};
 
 use crate::catalog::{Catalog, Depth, Model, ModelError, Mount};
+use crate::is_identifier;
 use crate::kdl_reader::{self, NodeReader, Problem, span_of};
-use crate::{IDENTIFIER_RULE, is_identifier};
 
 /// The largest number of units a rack may have.
 pub const MAX_UNITS: u8 = 60;
@@ -167,12 +167,8 @@ impl Layout {
         let mut names = HashMap::new();
         let mut found = false;
         for node in document.nodes() {
-            let key = node.name().value();
-            if key != "rack" {
-                problems.push(
-                    Problem::new(format!("unexpected top-level node `{key}`"), node.name().span())
-                        .with_help("only `rack { ... }` nodes are read from this file"),
-                );
+            if node.name().value() != "rack" {
+                problems.push(prb::unexpected_top_level(node));
                 continue;
             }
             found = true;
@@ -180,10 +176,7 @@ impl Layout {
             racks.extend(read_rack(node, &mut problems));
         }
         if !found {
-            problems.push(Problem::new(
-                "the file does not contain a `rack { ... }` node",
-                SourceSpan::from(0..0),
-            ));
+            problems.push(prb::no_rack());
         }
         if !problems.is_empty() {
             return Err(problems);
@@ -237,13 +230,7 @@ impl Rack {
             }
             let units = device.units(model, self.units);
             if units.highest() > u16::from(self.units) {
-                problems.push(
-                    Problem::new(
-                        format!("`{}` does not fit in the rack: it covers {units}", device.id),
-                        device.spans.placement(),
-                    )
-                    .with_label(format!("the rack has {} units", self.units)),
-                );
+                problems.push(prb::does_not_fit(device, units, self.units));
                 continue;
             }
             if matches!(device.placement, Placement::Slot { .. }) {
@@ -324,15 +311,8 @@ fn find_model<'c>(
 ) -> Option<&'c Model> {
     let problem = match catalog.model(&device.model) {
         Ok(model) => return Some(model),
-        Err(ModelError::Unknown { .. }) => {
-            Problem::new(format!("unknown model `{}`", device.model), device.spans.model)
-                .with_label("not in the catalog")
-                .with_suggestion(&device.model, catalog.ids())
-        }
-        Err(ModelError::Invalid(_)) => {
-            Problem::new(format!("the model `{}` has problems", device.model), device.spans.model)
-                .with_label("see the problems reported for its file")
-        }
+        Err(ModelError::Unknown { .. }) => prb::unknown_model(device, catalog),
+        Err(ModelError::Invalid(_)) => prb::invalid_model(device),
     };
     problems.push(problem);
     None
@@ -341,26 +321,8 @@ fn find_model<'c>(
 /// Reports a strip whose model is not side-mounted, or a side-mounted model placed in a slot.
 fn mount_mismatch(device: &Device, model: &Model) -> Option<Problem> {
     match (device.placement, model.mount) {
-        (Placement::Slot { .. }, Mount::Side) => Some(
-            Problem::new(
-                format!("`{}` is a strip mounted beside the rack", device.model),
-                device.spans.model,
-            )
-            .with_label("side-mounted model")
-            .with_help("add mount=\"left\" or mount=\"right\""),
-        ),
-        (Placement::Strip { .. }, Mount::Rack) => Some(
-            Problem::new(
-                format!("`{}` is mounted in the rack's slots, not beside it", device.model),
-                device.spans.mount.unwrap_or(device.spans.node),
-            )
-            .with_label("needs a model with `mount \"side\"`")
-            .with_help(if device.spans.u.is_some() {
-                "remove `mount`"
-            } else {
-                "remove `mount` and give the lowest unit with u=N"
-            }),
-        ),
+        (Placement::Slot { .. }, Mount::Side) => Some(prb::strip_in_a_slot(device)),
+        (Placement::Strip { .. }, Mount::Rack) => Some(prb::slot_model_as_a_strip(device)),
         _ => None,
     }
 }
@@ -376,20 +338,7 @@ fn overlap(
     if device.face != other.face && half {
         return None;
     }
-    let problem = Problem::new(
-        format!("`{}` overlaps `{}` on {shared}", device.id, other.id),
-        device.spans.placement(),
-    )
-    .with_label(format!("`{}` covers {units}", device.id))
-    .with_label_at(other.spans.placement(), format!("`{}` covers {other_units}", other.id));
-    Some(if device.face == other.face {
-        problem
-    } else {
-        problem.with_help(
-            "devices on the front and the rear can share units only when both models are \
-             `depth \"half\"`",
-        )
-    })
+    Some(prb::overlap((device, units), (other, other_units), shared))
 }
 
 /// Reads the `rack { ... }` node. Returns `None` when a required value is missing.
@@ -402,27 +351,20 @@ fn read_rack(node: &KdlNode, problems: &mut Vec<Problem>) -> Option<Rack> {
 
     let units = match units {
         Some(units) if !(1..=MAX_UNITS).contains(&units) => {
-            problems.push(Problem::new(
-                format!("`units` must be between 1 and {MAX_UNITS}"),
-                span_of(node, "units"),
-            ));
+            problems.push(prb::units_out_of_range(node));
             None
         }
         units => units,
     };
     if name.as_deref().is_some_and(|name| !is_identifier(name)) {
-        problems.push(Problem::new(format!("rack names {IDENTIFIER_RULE}"), span_of(node, 0)));
+        problems.push(prb::invalid_name(node, "rack names"));
     }
 
     let mut devices = Vec::new();
     let mut ids = HashMap::new();
     for child in block.map(KdlDocument::nodes).unwrap_or_default() {
-        let key = child.name().value();
-        if key != "device" {
-            problems.push(
-                Problem::new(format!("unknown node `{key}` in a rack"), child.name().span())
-                    .with_suggestion(key, NODES.iter().copied()),
-            );
+        if child.name().value() != "device" {
+            problems.push(prb::unknown_node(child));
             continue;
         }
         // Ids are compared even for devices with other problems, so that a repeated id is
@@ -446,11 +388,7 @@ fn repeated<'n>(
     let name = node.entry(0)?.value().as_string()?;
     let span = span_of(node, 0);
     match seen.entry(name) {
-        Entry::Occupied(first) => Some(
-            Problem::new(format!("the {what} `{name}` is used more than once"), span)
-                .with_label("used again here")
-                .with_label_at(*first.get(), "first used here"),
-        ),
+        Entry::Occupied(first) => Some(prb::repeated(what, name, span, *first.get())),
         Entry::Vacant(slot) => {
             slot.insert(span);
             None
@@ -470,28 +408,18 @@ fn read_device(node: &KdlNode, units: Option<u8>, problems: &mut Vec<Problem>) -
     reader.finish();
 
     if id.as_deref().is_some_and(|id| !is_identifier(id)) {
-        problems.push(Problem::new(format!("device ids {IDENTIFIER_RULE}"), span_of(node, 0)));
+        problems.push(prb::invalid_name(node, "device ids"));
     }
     if node.entry("u").is_none() && node.entry("mount").is_none() && !u_misspelled {
-        problems.push(
-            Problem::new("`device` is missing the property `u`", node.name().span())
-                .with_label("add u=...")
-                .with_help(
-                    "use u=N for the lowest unit the device occupies, or mount=\"left\" or \
-                     mount=\"right\" for a strip beside the rack",
-                ),
-        );
+        problems.push(prb::missing_u(node));
     }
     if u == Some(0) {
-        problems.push(Problem::new("`u` must be at least 1", span_of(node, "u")));
+        problems.push(prb::u_is_zero(node));
     }
     if let (Some(u), Some(units)) = (u, units)
         && u > units
     {
-        problems.push(
-            Problem::new(format!("`u` is above the top of the rack: {u}"), span_of(node, "u"))
-                .with_label(format!("the rack has {units} units")),
-        );
+        problems.push(prb::above_the_top(node, u, units));
     }
 
     let placement = match side {
@@ -508,11 +436,137 @@ fn read_device(node: &KdlNode, units: Option<u8>, problems: &mut Vec<Problem>) -
     Some(Device { id: id?, model: model?, placement, face, spans })
 }
 
+/// The problems reported for racks.
+mod prb {
+    use kdl::KdlNode;
+    use miette::SourceSpan;
+
+    use super::{Device, MAX_UNITS, NODES, UnitRange};
+    use crate::IDENTIFIER_RULE;
+    use crate::catalog::Catalog;
+    use crate::kdl_reader::{Problem, span_of};
+
+    pub(super) fn unexpected_top_level(node: &KdlNode) -> Problem {
+        let key = node.name().value();
+        Problem::new(format!("unexpected top-level node `{key}`"), node.name().span())
+            .with_help("only `rack { ... }` nodes are read from this file")
+    }
+
+    pub(super) fn no_rack() -> Problem {
+        Problem::new("the file does not contain a `rack { ... }` node", SourceSpan::from(0..0))
+    }
+
+    pub(super) fn units_out_of_range(node: &KdlNode) -> Problem {
+        Problem::new(format!("`units` must be between 1 and {MAX_UNITS}"), span_of(node, "units"))
+    }
+
+    /// `what` names what is written, such as `rack names`.
+    pub(super) fn invalid_name(node: &KdlNode, what: &str) -> Problem {
+        Problem::new(format!("{what} {IDENTIFIER_RULE}"), span_of(node, 0))
+    }
+
+    pub(super) fn unknown_node(node: &KdlNode) -> Problem {
+        let key = node.name().value();
+        Problem::new(format!("unknown node `{key}` in a rack"), node.name().span())
+            .with_suggestion(key, NODES.iter().copied())
+    }
+
+    /// `what` names what is repeated, such as `device id`.
+    pub(super) fn repeated(what: &str, name: &str, span: SourceSpan, first: SourceSpan) -> Problem {
+        Problem::new(format!("the {what} `{name}` is used more than once"), span)
+            .with_label("used again here")
+            .with_label_at(first, "first used here")
+    }
+
+    pub(super) fn missing_u(node: &KdlNode) -> Problem {
+        Problem::new("`device` is missing the property `u`", node.name().span())
+            .with_label("add u=...")
+            .with_help(
+                "use u=N for the lowest unit the device occupies, or mount=\"left\" or \
+                 mount=\"right\" for a strip beside the rack",
+            )
+    }
+
+    pub(super) fn u_is_zero(node: &KdlNode) -> Problem {
+        Problem::new("`u` must be at least 1", span_of(node, "u"))
+    }
+
+    pub(super) fn above_the_top(node: &KdlNode, u: u8, units: u8) -> Problem {
+        Problem::new(format!("`u` is above the top of the rack: {u}"), span_of(node, "u"))
+            .with_label(format!("the rack has {units} units"))
+    }
+
+    pub(super) fn unknown_model(device: &Device, catalog: &Catalog) -> Problem {
+        Problem::new(format!("unknown model `{}`", device.model), device.spans.model)
+            .with_label("not in the catalog")
+            .with_suggestion(&device.model, catalog.ids())
+    }
+
+    pub(super) fn invalid_model(device: &Device) -> Problem {
+        Problem::new(format!("the model `{}` has problems", device.model), device.spans.model)
+            .with_label("see the problems reported for its file")
+    }
+
+    pub(super) fn strip_in_a_slot(device: &Device) -> Problem {
+        Problem::new(
+            format!("`{}` is a strip mounted beside the rack", device.model),
+            device.spans.model,
+        )
+        .with_label("side-mounted model")
+        .with_help("add mount=\"left\" or mount=\"right\"")
+    }
+
+    pub(super) fn slot_model_as_a_strip(device: &Device) -> Problem {
+        Problem::new(
+            format!("`{}` is mounted in the rack's slots, not beside it", device.model),
+            device.spans.mount.unwrap_or(device.spans.node),
+        )
+        .with_label("needs a model with `mount \"side\"`")
+        .with_help(if device.spans.u.is_some() {
+            "remove `mount`"
+        } else {
+            "remove `mount` and give the lowest unit with u=N"
+        })
+    }
+
+    /// `units` is what the device covers in a rack of `rack_units`.
+    pub(super) fn does_not_fit(device: &Device, units: UnitRange, rack_units: u8) -> Problem {
+        Problem::new(
+            format!("`{}` does not fit in the rack: it covers {units}", device.id),
+            device.spans.placement(),
+        )
+        .with_label(format!("the rack has {rack_units} units"))
+    }
+
+    /// Two devices, each with the units it covers, and the units they share.
+    pub(super) fn overlap(
+        (device, units): (&Device, UnitRange),
+        (other, other_units): (&Device, UnitRange),
+        shared: UnitRange,
+    ) -> Problem {
+        let problem = Problem::new(
+            format!("`{}` overlaps `{}` on {shared}", device.id, other.id),
+            device.spans.placement(),
+        )
+        .with_label(format!("`{}` covers {units}", device.id))
+        .with_label_at(other.spans.placement(), format!("`{}` covers {other_units}", other.id));
+        if device.face == other.face {
+            problem
+        } else {
+            problem.with_help(
+                "devices on the front and the rear can share units only when both models are \
+                 `depth \"half\"`",
+            )
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use miette::Diagnostic;
 
     use super::*;
+    use crate::IDENTIFIER_RULE;
     use crate::testing::dir_with;
 
     fn messages(text: &str) -> Vec<String> {
