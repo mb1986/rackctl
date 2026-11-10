@@ -46,6 +46,11 @@ impl Problem {
         }
     }
 
+    /// Creates the problem of a file that could not be read.
+    pub(crate) fn unreadable(error: &io::Error) -> Self {
+        Self::new(format!("cannot read the file: {error}"), SourceSpan::from(0..0))
+    }
+
     /// Sets the short note displayed under the highlighted text.
     #[must_use]
     pub fn with_label(mut self, label: impl Into<String>) -> Self {
@@ -100,6 +105,10 @@ impl Problem {
     }
 }
 
+/// One of the files of a configuration: its position among the files read.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct FileId(pub usize);
+
 /// A value read from a file, with its location there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Spanned<T> {
@@ -136,9 +145,13 @@ impl FileError {
 
     /// Creates an error for the file `name`, which could not be read.
     pub fn unreadable(name: impl Into<String>, error: &io::Error) -> Self {
-        let problem =
-            Problem::new(format!("cannot read the file: {error}"), SourceSpan::from(0..0));
-        Self::new(name, "", vec![problem])
+        Self::new(name, "", vec![Problem::unreadable(error)])
+    }
+
+    /// Returns the name of the file.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     /// Returns the individual problems.

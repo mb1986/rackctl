@@ -12,13 +12,15 @@ use strum::{EnumString, IntoStaticStr, VariantNames};
 pub use cabling::{Cabling, End, Endpoint, Link, SocketId};
 pub use endpoint::{EndpointName, EndpointRef, PatchSide, endpoint_name, parse_endpoint};
 
-use crate::kdl_reader::{self, NodeReader, Problem, span_of};
+use crate::kdl_reader::{self, FileId, NodeReader, Problem, span_of};
 
 /// The cables of `wiring.kdl` as written, before their endpoints are looked up in the rack.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Wiring {
     /// The statements in the order they appear in the file.
     pub paths: Vec<CablePath>,
+    /// The file the wiring is described in.
+    pub file: FileId,
 }
 
 /// One statement: cables of one type along a path, each pair of neighbouring endpoints being
@@ -50,12 +52,14 @@ impl Wiring {
     ///
     /// Returns every problem found in the file.
     pub fn parse(text: &str) -> Result<Self, Vec<Problem>> {
-        kdl_reader::parse_single(text, "wiring", |node, problems| Some(read_wiring(node, problems)))
+        kdl_reader::parse_single(text, "wiring", |node, problems| {
+            Some(read_wiring(node, FileId::default(), problems))
+        })
     }
 }
 
 /// Reads the `wiring { ... }` node.
-fn read_wiring(node: &KdlNode, problems: &mut Vec<Problem>) -> Wiring {
+pub(crate) fn read_wiring(node: &KdlNode, file: FileId, problems: &mut Vec<Problem>) -> Wiring {
     let mut reader = NodeReader::new(node, problems);
     let block = reader.children();
     reader.finish();
@@ -65,7 +69,7 @@ fn read_wiring(node: &KdlNode, problems: &mut Vec<Problem>) -> Wiring {
         .iter()
         .filter_map(|child| read_path(child, problems))
         .collect();
-    Wiring { paths }
+    Wiring { paths, file }
 }
 
 /// Reads a statement such as `net srv01:nic1 patch-32:b-f14 sg300:11`.

@@ -10,7 +10,7 @@ use strum::{EnumString, IntoStaticStr, VariantNames};
 
 use crate::catalog::{Catalog, Depth, Model, ModelError, Mount};
 use crate::is_identifier;
-use crate::kdl_reader::{self, NodeReader, Problem, span_of};
+use crate::kdl_reader::{self, FileId, NodeReader, Problem, span_of};
 
 /// The largest number of units a rack may have.
 pub const MAX_UNITS: u8 = 60;
@@ -31,6 +31,8 @@ pub struct Rack {
     pub units: u8,
     /// Devices in the order they appear in the file.
     pub devices: Vec<Device>,
+    /// The file the rack is described in.
+    pub file: FileId,
 }
 
 /// A device mounted in a rack.
@@ -173,16 +175,19 @@ impl Layout {
             }
             found = true;
             problems.extend(repeated(&mut names, node, "rack name"));
-            racks.extend(read_rack(node, &mut problems));
+            racks.extend(read_rack(node, FileId::default(), &mut problems));
         }
         if !found {
             problems.push(prb::no_rack());
         }
-        if !problems.is_empty() {
-            return Err(problems);
-        }
+        if problems.is_empty() { Ok(Self::new(racks)) } else { Err(problems) }
+    }
+
+    /// Creates the layout of `racks`, whose names are all different.
+    #[must_use]
+    pub fn new(mut racks: Vec<Rack>) -> Self {
         racks.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(Self { racks })
+        Self { racks }
     }
 
     /// Returns the racks in the order of their names.
@@ -211,7 +216,9 @@ impl Rack {
     ///
     /// Returns every problem found in the file.
     pub fn parse(text: &str) -> Result<Self, Vec<Problem>> {
-        kdl_reader::parse_single(text, "rack", read_rack)
+        kdl_reader::parse_single(text, "rack", |node, problems| {
+            read_rack(node, FileId::default(), problems)
+        })
     }
 
     /// Checks the rack against the catalog: every model exists and is valid, strips use
@@ -342,7 +349,7 @@ fn overlap(
 }
 
 /// Reads the `rack { ... }` node. Returns `None` when a required value is missing.
-fn read_rack(node: &KdlNode, problems: &mut Vec<Problem>) -> Option<Rack> {
+pub(crate) fn read_rack(node: &KdlNode, file: FileId, problems: &mut Vec<Problem>) -> Option<Rack> {
     let mut reader = NodeReader::new(node, problems);
     let name = reader.arg_str(0, "name");
     let units = reader.req_int::<u8>("units");
@@ -375,7 +382,7 @@ fn read_rack(node: &KdlNode, problems: &mut Vec<Problem>) -> Option<Rack> {
         }
     }
 
-    Some(Rack { name: name?, units: units?, devices })
+    Some(Rack { name: name?, units: units?, devices, file })
 }
 
 /// Reports the first argument of `node` when a node before it has the same one, recorded in
