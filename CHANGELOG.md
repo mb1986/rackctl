@@ -16,7 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   user models are read from `catalog/` in the directory, or next to a single file. Each
   problem is reported in the file it comes from.
 - Several racks: a configuration may hold several `rack` nodes, with device ids unique
-  within each rack. Wiring is not supported with more than one rack yet.
+  within each rack. A device is written `rack.device`, such as `lab.sw:28` in the wiring or
+  `rackctl trace lab.sw:28`, or by its name alone when only one rack has a device of that
+  name. With several racks, rackctl prints devices with their rack.
 - `rackctl check`: validates the configuration and every catalog model, then summarizes each
   rack: devices by kind, used and free units, and side strips.
 - `rackctl catalog show <id>`: draws a model's face in a slice of rack, or a side strip over

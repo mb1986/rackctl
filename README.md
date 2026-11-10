@@ -63,6 +63,9 @@ wiring {
 }
 ```
 
+With several racks, a device is written with its rack, as `office.switch:28`. Its name alone
+is enough when only one rack has a device of that name.
+
 ## Building
 
 rackctl needs Rust 1.98.1 or newer.
