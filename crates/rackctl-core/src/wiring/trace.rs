@@ -38,7 +38,7 @@ mod tests {
     use indoc::indoc;
 
     use crate::catalog::{Catalog, Part};
-    use crate::rack::Rack;
+    use crate::rack::{DeviceId, Layout, Rack};
     use crate::testing::dir_with;
     use crate::wiring::resolve::tests::resolve;
     use crate::wiring::{Wiring, endpoint_name};
@@ -55,11 +55,11 @@ mod tests {
 
     /// Returns the path through the endpoint `from`, written the short way.
     fn path(from: &str) -> Vec<String> {
-        let (_, rack, result) = resolve(WIRING);
+        let (_, layout, result) = resolve(WIRING);
         let cabling = result.expect("valid wiring");
         let catalog = Catalog::builtin();
-        let socket = cabling.find(from, &rack, &catalog).expect("endpoint");
-        let name = |socket| endpoint_name(cabling.endpoint(socket), &rack, &catalog);
+        let socket = cabling.find(from, &layout, &catalog).expect("endpoint");
+        let name = |socket| endpoint_name(cabling.endpoint(socket), &layout, &catalog);
         cabling.path(socket).into_iter().map(name).collect()
     }
 
@@ -93,28 +93,29 @@ mod tests {
 
     #[test]
     fn finds_what_feeds_a_device() {
-        let (_, rack, result) = resolve(WIRING);
+        let (_, layout, result) = resolve(WIRING);
         let cabling = result.expect("valid wiring");
         let catalog = Catalog::builtin();
-        let srv01 = rack.devices.iter().position(|device| device.id == "srv01").expect("srv01");
+        let srv01 = layout.devices().position(|device| device.id == "srv01").expect("srv01");
+        let srv01 = DeviceId(srv01);
         let feeds: Vec<String> = cabling
             .sockets(srv01, Part::Psu)
             .filter_map(|socket| cabling.connected(End { socket, side: None }))
-            .map(|end| endpoint_name(cabling.endpoint(end.socket), &rack, &catalog))
+            .map(|end| endpoint_name(cabling.endpoint(end.socket), &layout, &catalog))
             .collect();
         assert_eq!(feeds, ["pdu:8"]);
         assert_eq!(cabling.sockets(srv01, Part::Psu).count(), 2);
     }
 
-    /// Asserts that the name of every endpoint of `rack` finds that endpoint again.
+    /// Asserts that the name of every endpoint of `layout` finds that endpoint again.
     #[track_caller]
-    fn assert_names_find_their_endpoints(rack: &Rack, catalog: &Catalog, cabling: &Cabling) {
-        for device in 0..rack.devices.len() {
+    fn assert_names_find_their_endpoints(layout: &Layout, catalog: &Catalog, cabling: &Cabling) {
+        for device in (0..layout.devices().count()).map(DeviceId) {
             for part in Part::ENDPOINTS {
                 for socket in cabling.sockets(device, part) {
-                    let name = endpoint_name(cabling.endpoint(socket), rack, catalog);
+                    let name = endpoint_name(cabling.endpoint(socket), layout, catalog);
                     let found =
-                        cabling.find(&name, rack, catalog).map_err(|p| p.message().to_owned());
+                        cabling.find(&name, layout, catalog).map_err(|p| p.message().to_owned());
                     assert_eq!(found, Ok(socket), "{name}");
                 }
             }
@@ -123,18 +124,43 @@ mod tests {
 
     #[test]
     fn finds_an_endpoint_written_with_leading_zeros() {
-        let (_, rack, result) = resolve(WIRING);
+        let (_, layout, result) = resolve(WIRING);
         let cabling = result.expect("valid wiring");
         let catalog = Catalog::builtin();
-        let find = |text| cabling.find(text, &rack, &catalog).expect(text);
+        let find = |text| cabling.find(text, &layout, &catalog).expect(text);
         assert_eq!(find("pdu:08"), find("pdu:8"));
         assert_eq!(find("srv01:psu01"), find("srv01:psu1"));
     }
 
     #[test]
     fn names_every_endpoint_so_that_it_is_found_again() {
-        let (_, rack, result) = resolve(WIRING);
-        assert_names_find_their_endpoints(&rack, &Catalog::builtin(), &result.expect("wiring"));
+        let (_, layout, result) = resolve(WIRING);
+        assert_names_find_their_endpoints(&layout, &Catalog::builtin(), &result.expect("wiring"));
+    }
+
+    #[test]
+    fn names_endpoints_with_their_rack_when_there_are_several() {
+        let rack = |name| {
+            let text = format!(
+                r#"rack "{name}" units=2 {{
+                    device "sw" model="cisco/sg350x-48p" u=2
+                    device "patch" model="generic/patchpanel-24" u=1
+                }}"#
+            );
+            Rack::parse(&text).expect("valid rack")
+        };
+        let layout = Layout::new(vec![rack("lab"), rack("office")]);
+        let catalog = Catalog::builtin();
+        let wiring = Wiring::parse(
+            "wiring { net lab.sw:1 lab.patch:f-b1 office.patch:b-f1 office.sw:XG1; }",
+        );
+        let cabling = wiring.expect("wiring").resolve(&layout, &catalog).expect("valid wiring");
+
+        let from = cabling.find("office.sw:XG1", &layout, &catalog).expect("endpoint");
+        let name = |socket| endpoint_name(cabling.endpoint(socket), &layout, &catalog);
+        let path: Vec<_> = cabling.path(from).into_iter().map(name).collect();
+        assert_eq!(path, ["office.sw:XG1", "office.patch:1", "lab.patch:1", "lab.sw:1"]);
+        assert_names_find_their_endpoints(&layout, &catalog, &cabling);
     }
 
     #[test]
@@ -150,10 +176,11 @@ mod tests {
         catalog.add_dirs(&[dir.path()]).expect("readable catalog");
         let rack = Rack::parse(r#"rack "r" units=1 { device "kvm" model="x/kvm" u=1 }"#)
             .expect("valid rack");
-        let cabling = Wiring::parse("wiring {}").expect("wiring").resolve(&rack, &catalog);
+        let layout = Layout::new(vec![rack]);
+        let cabling = Wiring::parse("wiring {}").expect("wiring").resolve(&layout, &catalog);
         let cabling = cabling.expect("valid wiring");
-        let xg1 = cabling.sockets(0, Part::Port).nth(4).expect("port XG1");
-        assert_eq!(endpoint_name(cabling.endpoint(xg1), &rack, &catalog), "kvm:XG1");
-        assert_names_find_their_endpoints(&rack, &catalog, &cabling);
+        let xg1 = cabling.sockets(DeviceId(0), Part::Port).nth(4).expect("port XG1");
+        assert_eq!(endpoint_name(cabling.endpoint(xg1), &layout, &catalog), "kvm:XG1");
+        assert_names_find_their_endpoints(&layout, &catalog, &cabling);
     }
 }

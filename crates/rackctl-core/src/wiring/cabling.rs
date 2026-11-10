@@ -1,7 +1,8 @@
-//! Checked wiring: the cables between the sockets of the rack's devices.
+//! Checked wiring: the cables between the sockets of the layout's devices.
 
 use super::{LinkKind, PatchSide};
 use crate::catalog::Part;
+use crate::rack::DeviceId;
 
 /// One endpoint of one device, such as PSU 1 of srv01, as its place in [`Cabling`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -16,8 +17,7 @@ impl SocketId {
 /// Which device and endpoint a socket is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Endpoint {
-    /// The device's position in the rack's devices.
-    pub device: usize,
+    pub device: DeviceId,
     pub part: Part,
     /// The endpoint's place among those of its part, as [`Model::endpoint_index`] gives it.
     ///
@@ -46,7 +46,7 @@ pub struct Link {
     pub ends: [End; 2],
 }
 
-/// The cables between the rack's devices, with every endpoint looked up and every use
+/// The cables between the layout's devices, with every endpoint looked up and every use
 /// checked. Each endpoint of each device is a socket in one table, so following a cable is
 /// a lookup.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,7 +84,7 @@ impl Cabling {
             for (&part, &count) in Part::ENDPOINTS.iter().zip(&endpoints.counts) {
                 starts.push(position(sockets.len()));
                 sockets.extend((0..count).map(|index| Socket {
-                    endpoint: Endpoint { device, part, index },
+                    endpoint: Endpoint { device: DeviceId(device), part, index },
                     links: [None; 2],
                 }));
             }
@@ -107,9 +107,9 @@ impl Cabling {
 
     /// Returns the socket of an endpoint, if the device has it.
     #[must_use]
-    pub fn socket(&self, device: usize, part: Part, index: u16) -> Option<SocketId> {
+    pub fn socket(&self, device: DeviceId, part: Part, index: u16) -> Option<SocketId> {
         let part = Part::ENDPOINTS.iter().position(|&endpoint| endpoint == part)?;
-        let at = device * Part::ENDPOINTS.len() + part;
+        let at = device.0 * Part::ENDPOINTS.len() + part;
         let (start, end) = (*self.starts.get(at)?, *self.starts.get(at + 1)?);
         let id = start + u32::from(index);
         (id < end).then_some(SocketId(id))
@@ -122,9 +122,9 @@ impl Cabling {
     }
 
     /// Returns the sockets of a device's part, such as its PSUs.
-    pub fn sockets(&self, device: usize, part: Part) -> impl Iterator<Item = SocketId> {
+    pub fn sockets(&self, device: DeviceId, part: Part) -> impl Iterator<Item = SocketId> {
         let part = Part::ENDPOINTS.iter().position(|&endpoint| endpoint == part);
-        let at = part.map(|part| device * Part::ENDPOINTS.len() + part);
+        let at = part.map(|part| device.0 * Part::ENDPOINTS.len() + part);
         let start = at.and_then(|at| self.starts.get(at)).copied().unwrap_or(0);
         let end = at.and_then(|at| self.starts.get(at + 1)).copied().unwrap_or(0);
         (start..end).map(SocketId)
@@ -134,7 +134,7 @@ impl Cabling {
     #[must_use]
     pub fn is_patch_port(&self, socket: SocketId) -> bool {
         let endpoint = self.endpoint(socket);
-        endpoint.part == Part::Port && self.patch_panels[endpoint.device]
+        endpoint.part == Part::Port && self.patch_panels[endpoint.device.0]
     }
 
     /// Returns the cable plugged in at `end`, if there is one.

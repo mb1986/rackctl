@@ -87,19 +87,15 @@ pub fn load(path: &Path, catalog: &Catalog) -> Result<Config, Vec<FileError>> {
     }
 
     // The wiring names the racks' devices, so it is resolved only against valid racks.
-    let cabling = match (found.wiring, layout.racks()) {
-        (None, _) => None,
-        (Some((wiring, _)), [rack]) => match wiring.resolve(rack, catalog) {
+    let cabling = match found.wiring {
+        None => None,
+        Some((wiring, _)) => match wiring.resolve(&layout, catalog) {
             Ok(cabling) => Some(cabling),
             Err(problems) => {
                 files[wiring.file.0].problems = problems;
                 return Err(errors(files));
             }
         },
-        (Some((_, place)), _) => {
-            files[place.file.0].problems.push(prb::wiring_with_several_racks(place.span));
-            return Err(errors(files));
-        }
     };
     Ok(Config { files: paths, layout, cabling })
 }
@@ -288,10 +284,6 @@ mod prb {
         let problem = Problem::new("the configuration has more than one `wiring` node", span)
             .with_label("given again here");
         first.note(problem, "first given")
-    }
-
-    pub(super) fn wiring_with_several_racks(span: SourceSpan) -> Problem {
-        Problem::new("`wiring` is not supported with several racks yet", span)
     }
 }
 
@@ -558,15 +550,50 @@ mod tests {
         assert_eq!(problem.help(), Some(&*format!("first given in {}, line 1", first.display())));
     }
 
+    /// The racks `lab` and `office`, each with the servers `a` and `b`, and `lab` with `c`.
+    const TWO_RACKS: &str = r#"
+        rack "lab" units=4 {
+            device "a" model="x/server" u=1
+            device "b" model="x/server" u=2
+            device "c" model="x/server" u=3
+        }
+        rack "office" units=4 {
+            device "a" model="x/server" u=1
+            device "b" model="x/server" u=2
+        }"#;
+
     #[test]
-    fn refuses_wiring_with_several_racks_for_now() {
+    fn connects_devices_of_different_racks() {
+        let (_dir, loaded) = load_in(
+            &[("racks.kdl", TWO_RACKS), ("w.kdl", "wiring { net lab.a:nic1 office.a:nic1; }")],
+            "",
+        );
+        let config = loaded.expect("valid configuration");
+        let cabling = config.cabling.expect("cabling");
+        let catalog = Catalog::default();
+        let ends = cabling.links()[0].ends;
+        let names = ends.map(|end| {
+            wiring::endpoint_name(cabling.endpoint(end.socket), &config.layout, &catalog)
+        });
+        assert_eq!(names, ["lab.a:nic1", "office.a:nic1"]);
+    }
+
+    #[test]
+    fn takes_a_name_alone_when_one_rack_has_it() {
         let (dir, loaded) = load_in(
-            &[("racks.kdl", r#"rack "a" units=4; rack "b" units=4"#), ("w.kdl", "wiring {}")],
+            &[("racks.kdl", TWO_RACKS), ("w.kdl", "wiring { net c:nic1 office.b:nic1; }")],
+            "",
+        );
+        assert_eq!(loaded.expect("valid configuration").cabling.expect("cabling").links().len(), 1);
+        drop(dir);
+
+        let (dir, loaded) = load_in(
+            &[("racks.kdl", TWO_RACKS), ("w.kdl", "wiring { net a:nic1 atic.b:nic1; }")],
             "",
         );
         assert_eq!(
             reported(dir.path(), loaded),
-            [in_file("w.kdl", &["`wiring` is not supported with several racks yet"])]
+            [in_file("w.kdl", &["`a` is in several racks", "unknown rack `atic`"])]
         );
     }
 

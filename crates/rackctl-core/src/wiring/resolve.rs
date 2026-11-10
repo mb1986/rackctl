@@ -1,6 +1,4 @@
-//! Looking up the wiring's endpoints in the rack and checking its cables.
-
-use std::collections::HashMap;
+//! Looking up the wiring's endpoints in the layout and checking its cables.
 
 use miette::SourceSpan;
 
@@ -9,9 +7,9 @@ use super::endpoint::main_part;
 use super::{CablePath, EndpointName, EndpointRef, LinkKind, PatchSide, Wiring, parse_endpoint};
 use crate::catalog::{Catalog, Kind, Model, Part, part_names};
 use crate::kdl_reader::Problem;
-use crate::rack::Rack;
+use crate::rack::{DeviceRef, Layout};
 
-/// An endpoint found in the rack.
+/// An endpoint found in the layout.
 #[derive(Debug, Clone, Copy)]
 struct Found {
     socket: SocketId,
@@ -32,38 +30,30 @@ enum Place {
     Alone,
 }
 
-/// The rack's devices and their models, for looking up endpoints.
+/// The layout's devices and their models, for looking up endpoints.
 struct Devices<'a> {
-    rack: &'a Rack,
+    layout: &'a Layout,
+    /// The model of each device, by [`DeviceId`].
     models: Vec<Option<&'a Model>>,
-    ids: HashMap<&'a str, usize>,
 }
 
 impl<'a> Devices<'a> {
-    fn new(rack: &'a Rack, catalog: &'a Catalog) -> Self {
-        Self {
-            rack,
-            models: rack.devices.iter().map(|device| catalog.model(&device.model).ok()).collect(),
-            ids: rack
-                .devices
-                .iter()
-                .enumerate()
-                .map(|(index, device)| (device.id.as_str(), index))
-                .collect(),
-        }
+    fn new(layout: &'a Layout, catalog: &'a Catalog) -> Self {
+        let models = layout.devices().map(|device| catalog.model(&device.model).ok()).collect();
+        Self { layout, models }
     }
 }
 
 impl Wiring {
-    /// Looks up every endpoint in `rack`, whose models come from `catalog`, and checks the
-    /// cables: the endpoints they connect, and that each endpoint, or each side of a patch
-    /// port, takes one cable.
+    /// Looks up every endpoint in `layout`, whose models come from `catalog`, and checks
+    /// the cables: the endpoints they connect, and that each endpoint, or each side of a
+    /// patch port, takes one cable.
     ///
     /// # Errors
     ///
     /// Returns every problem found, located in the wiring's file.
-    pub fn resolve(&self, rack: &Rack, catalog: &Catalog) -> Result<Cabling, Vec<Problem>> {
-        let devices = Devices::new(rack, catalog);
+    pub fn resolve(&self, layout: &Layout, catalog: &Catalog) -> Result<Cabling, Vec<Problem>> {
+        let devices = Devices::new(layout, catalog);
         let endpoints: Vec<DeviceEndpoints> = devices
             .models
             .iter()
@@ -130,17 +120,22 @@ impl Wiring {
 }
 
 impl Cabling {
-    /// Looks up an endpoint written as in the wiring, such as `srv01:psu1`, in `rack`, whose
-    /// models come from `catalog`. A patch-panel port may leave out its side.
+    /// Looks up an endpoint written as in the wiring, such as `srv01:psu1`, in `layout`,
+    /// whose models come from `catalog`. A patch-panel port may leave out its side.
     ///
     /// # Errors
     ///
-    /// Returns why `text` is not an endpoint of the rack.
-    pub fn find(&self, text: &str, rack: &Rack, catalog: &Catalog) -> Result<SocketId, Problem> {
+    /// Returns why `text` is not an endpoint of the layout.
+    pub fn find(
+        &self,
+        text: &str,
+        layout: &Layout,
+        catalog: &Catalog,
+    ) -> Result<SocketId, Problem> {
         let span = SourceSpan::from(0..text.len());
         let (device, name) = parse_endpoint(text).map_err(|message| Problem::new(message, span))?;
         let end = EndpointRef { device: device.to_owned(), name, span };
-        Ok(Devices::new(rack, catalog).find(&end, Place::Alone, self)?.socket)
+        Ok(Devices::new(layout, catalog).find(&end, Place::Alone, self)?.socket)
     }
 }
 
@@ -150,14 +145,9 @@ impl Devices<'_> {
         // The endpoint as written, for messages only.
         let written = || format!("{}:{}", end.device, end.name);
         let problem = |message: String| Problem::new(message, end.span);
-        let Some(&device) = self.ids.get(end.device.as_str()) else {
-            return Err(problem(format!("unknown device `{}`", end.device))
-                .with_label("not in the rack")
-                // In file order, so that a tie is always settled the same way.
-                .with_suggestion(&end.device, self.rack.devices.iter().map(|d| d.id.as_str())));
-        };
-        let id = &self.rack.devices[device].id;
-        let Some(model) = self.models[device] else {
+        let device = self.layout.find_device(DeviceRef::parse(&end.device), None, end.span)?;
+        let id = &self.layout.device_name(device);
+        let Some(model) = self.models[device.0] else {
             return Err(problem(format!("the model of `{id}` has problems"))
                 .with_label("see the problems reported for its file"));
         };
@@ -395,6 +385,7 @@ pub(super) mod tests {
     use miette::Diagnostic;
 
     use super::*;
+    use crate::rack::{DeviceId, Rack};
     use crate::testing::pointed;
 
     const RACK: &str = indoc! {r#"
@@ -408,13 +399,16 @@ pub(super) mod tests {
         }"#};
 
     /// Resolves the wiring statements `paths` against [`RACK`] and the built-in catalog.
-    pub(in crate::wiring) fn resolve(paths: &str) -> (String, Rack, Result<Cabling, Vec<Problem>>) {
+    pub(in crate::wiring) fn resolve(
+        paths: &str,
+    ) -> (String, Layout, Result<Cabling, Vec<Problem>>) {
         let catalog = Catalog::builtin();
         let rack = Rack::parse(RACK).expect("valid rack");
         assert!(rack.check(&catalog).is_empty());
+        let layout = Layout::new(vec![rack]);
         let text = format!("wiring {{\n{paths}\n}}");
-        let result = Wiring::parse(&text).expect("valid wiring").resolve(&rack, &catalog);
-        (text, rack, result)
+        let result = Wiring::parse(&text).expect("valid wiring").resolve(&layout, &catalog);
+        (text, layout, result)
     }
 
     /// Asserts the problems of `paths`, each as its message and the text it points at.
@@ -427,7 +421,7 @@ pub(super) mod tests {
 
     #[test]
     fn connects_the_endpoints_along_each_path() {
-        let (_, rack, result) = resolve(indoc! {"
+        let (_, layout, result) = resolve(indoc! {"
             power pdu:1 srv01:psu1
             power pdu:outlet2 srv01:psu2
             mgmt srv01:mgmt patch:b-f1 sw:1
@@ -439,7 +433,8 @@ pub(super) mod tests {
             let endpoint = cabling.endpoint(end.socket);
             let part: &str = endpoint.part.into();
             let side = end.side.map_or(String::new(), |side| format!(" {}", side.name()));
-            format!("{}:{part}{}{side}", rack.devices[endpoint.device].id, endpoint.index)
+            let id = &layout.device(endpoint.device).1.id;
+            format!("{id}:{part}{}{side}", endpoint.index)
         };
         let links: Vec<String> = cabling
             .links()
@@ -462,7 +457,7 @@ pub(super) mod tests {
             ]
         );
         let front = End {
-            socket: cabling.socket(1, Part::Port, 0).expect("port 1"),
+            socket: cabling.socket(DeviceId(1), Part::Port, 0).expect("port 1"),
             side: Some(PatchSide::Front),
         };
         assert_eq!(cabling.link_at(front), Some(&cabling.links()[3]));

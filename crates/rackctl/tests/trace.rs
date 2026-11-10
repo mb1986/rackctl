@@ -55,6 +55,39 @@ fn reports_an_endpoint_the_rack_does_not_have() {
 }
 
 #[test]
+fn follows_a_cable_between_racks() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    fs::write(
+        dir.path().join("racks.kdl"),
+        r#"rack "office" units=2 { device "sw" model="cisco/sg350-28" u=1; }
+           rack "lab" units=3 {
+               device "sw" model="cisco/sg350-28" u=3
+               device "srv" model="dell/r630-sff8" u=2
+           }"#,
+    )
+    .expect("write the racks");
+    fs::write(
+        dir.path().join("wiring.kdl"),
+        "wiring { net srv:nic1 lab.sw:1; net lab.sw:28 office.sw:28; }",
+    )
+    .expect("write the wiring");
+
+    let output = trace(dir.path(), "office.sw:28");
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "office.sw:28 -> lab.sw:28\n");
+
+    let output = trace(dir.path(), "srv:nic1");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "lab.srv:nic1 -> lab.sw:1\n");
+
+    let output = trace(dir.path(), "sw:1");
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "rackctl: `sw` is in several racks; write `lab.sw` or `office.sw`\n"
+    );
+}
+
+#[test]
 fn reports_a_rack_without_wiring() {
     let dir = tempfile::tempdir().expect("temporary directory");
     let rack_file = dir.path().join("rack.kdl");

@@ -6,9 +6,10 @@ use miette::SourceSpan;
 
 use super::Endpoint;
 use crate::catalog::{Catalog, Kind, Part};
-use crate::rack::Rack;
+use crate::rack::Layout;
 
-/// An endpoint as written: a device id and the name of one of its endpoints.
+/// An endpoint as written: a device, as `device` or `rack.device`, and the name of one of
+/// its endpoints.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EndpointRef {
     pub device: String,
@@ -87,23 +88,26 @@ impl fmt::Display for EndpointName {
     }
 }
 
-/// Writes an endpoint of `rack` the short way: `pdu:8`, `sw:XG1`, `patch-32:15`,
+/// Writes an endpoint of `layout` the short way: `pdu:8`, `sw:XG1`, `patch-32:15`,
 /// `srv01:psu1`, or `srv01:mgmt` when the device has one management port.
+///
+/// With several racks, the device is written with its rack: `lab.pdu:8`.
 #[must_use]
-pub fn endpoint_name(endpoint: Endpoint, rack: &Rack, catalog: &Catalog) -> String {
-    let device = &rack.devices[endpoint.device];
+pub fn endpoint_name(endpoint: Endpoint, layout: &Layout, catalog: &Catalog) -> String {
+    let (_, device) = layout.device(endpoint.device);
+    let id = layout.device_name(endpoint.device);
     let part: &str = endpoint.part.into();
     let fallback = endpoint.index.saturating_add(1);
     let Ok(model) = catalog.model(&device.model) else {
-        return format!("{}:{part}{fallback}", device.id);
+        return format!("{id}:{part}{fallback}");
     };
     let (group, number) =
         model.endpoint_name(endpoint.part, endpoint.index).unwrap_or((None, fallback));
     match group {
-        Some(group) => format!("{}:{group}{number}", device.id),
-        None if main_part(model.kind) == Some(endpoint.part) => format!("{}:{number}", device.id),
-        None if model.components.count(endpoint.part) == 1 => format!("{}:{part}", device.id),
-        None => format!("{}:{part}{number}", device.id),
+        Some(group) => format!("{id}:{group}{number}"),
+        None if main_part(model.kind) == Some(endpoint.part) => format!("{id}:{number}"),
+        None if model.components.count(endpoint.part) == 1 => format!("{id}:{part}"),
+        None => format!("{id}:{part}{number}"),
     }
 }
 
@@ -120,7 +124,7 @@ pub(super) const fn main_part(kind: Kind) -> Option<Part> {
 const FORMS: &str = "write `device:endpoint`, such as `pdu:8`, `srv01:psu1`, `sg350x:XG1`, \
                      `srv01:mgmt` or `patch-32:b14`";
 
-/// Splits `text` into a device id and an endpoint name.
+/// Splits `text` into a device, written as `device` or `rack.device`, and an endpoint name.
 ///
 /// # Errors
 ///
