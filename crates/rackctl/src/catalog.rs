@@ -37,15 +37,16 @@ enum SampleState {
     Off,
 }
 
-/// Runs `catalog show`. `config` is the rack file named with `-c`, whose user catalog is used.
+/// Runs `catalog show`. `config` is the configuration named with `-c`, whose user catalog is
+/// used.
 pub fn show(
     args: &ShowArgs,
     config: Option<PathBuf>,
     locations: &Locations,
 ) -> io::Result<ExitCode> {
     let mut err = io::stderr();
-    let rack_file = config.or_else(|| locations.rack_file());
-    let Some(catalog) = open_catalog(rack_file.as_deref(), locations, &mut err)? else {
+    let config = config.or_else(|| locations.config_path());
+    let Some(catalog) = open_catalog(config.as_deref(), locations, &mut err)? else {
         return Ok(ExitCode::from(CONFIG_ERROR));
     };
     let model = match catalog.model(&args.id) {

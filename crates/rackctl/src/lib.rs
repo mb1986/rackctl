@@ -11,17 +11,14 @@ mod style;
 mod trace;
 
 use std::io::{self, Write};
-use std::iter;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anstream::{AutoStream, ColorChoice};
 use clap::{CommandFactory, Parser, Subcommand};
 use rackctl_core::catalog::Catalog;
-use rackctl_core::config;
+use rackctl_core::config::{self, Config};
 use rackctl_core::kdl_reader::FileError;
-use rackctl_core::rack::Rack;
-use rackctl_core::wiring::Cabling;
 
 use crate::paths::Locations;
 
@@ -35,8 +32,8 @@ struct Cli {
         short,
         long,
         global = true,
-        value_name = "FILE",
-        help = "The rack file [default: $RACKCTL_CONFIG, or ~/.config/rackctl/rack.kdl]"
+        value_name = "PATH",
+        help = "The configuration directory or file [default: $RACKCTL_CONFIG, or ~/.config/rackctl]"
     )]
     config: Option<PathBuf>,
 
@@ -46,9 +43,9 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Check the configuration and the catalog, and summarize the rack
+    /// Check the configuration and the catalog, and summarize each rack
     Check,
-    /// Draw the rack's front view with a sample status
+    /// Draw the front view of each rack, or of one, with a sample status
     Rack(rack::RackArgs),
     /// Follow the cables from an endpoint, through patch panels
     Trace(trace::TraceArgs),
@@ -94,31 +91,28 @@ fn exit_code(result: io::Result<ExitCode>) -> ExitCode {
     })
 }
 
-/// Returns the rack file: `config`, or the default one. Returns `None` after reporting that
-/// there is no default.
-fn find_rack_file(
+/// Returns the configuration's directory or file: `config`, or the default one. Returns
+/// `None` after reporting that there is no default.
+fn find_config(
     config: Option<PathBuf>,
     locations: &Locations,
     err: &mut impl Write,
 ) -> io::Result<Option<PathBuf>> {
-    let rack_file = config.or_else(|| locations.rack_file());
-    if rack_file.is_none() {
+    let path = config.or_else(|| locations.config_path());
+    if path.is_none() {
         writeln!(
             err,
             "rackctl: cannot find the configuration because $HOME is not set; \
-             use -c FILE or set $RACKCTL_CONFIG"
+             use -c PATH or set $RACKCTL_CONFIG"
         )?;
     }
-    Ok(rack_file)
+    Ok(path)
 }
 
-/// A valid configuration: the catalog, the rack and its wiring.
+/// A valid configuration with the catalog its models come from.
 struct Setup {
     catalog: Catalog,
-    rack: Rack,
-    wiring_file: PathBuf,
-    /// The cables, or `None` without a wiring file.
-    cabling: Option<Cabling>,
+    config: Config,
 }
 
 /// Loads the configuration named with `-c`, or the default one. Returns `None` after
@@ -128,26 +122,17 @@ fn load_setup(
     locations: &Locations,
     err: &mut impl Write,
 ) -> io::Result<Option<Setup>> {
-    let Some(rack_file) = find_rack_file(config, locations, err)? else { return Ok(None) };
-    let Some(catalog) = open_catalog(Some(&rack_file), locations, err)? else {
+    let Some(path) = find_config(config, locations, err)? else { return Ok(None) };
+    let Some(catalog) = open_catalog(Some(&path), locations, err)? else {
         return Ok(None);
     };
-    let rack = match config::load_rack(&rack_file, &catalog) {
-        Ok(rack) => rack,
-        Err(error) => {
-            write_reports(err, iter::once(&error).chain(catalog.invalid_models()))?;
-            return Ok(None);
+    match config::load(&path, &catalog) {
+        Ok(config) => Ok(Some(Setup { catalog, config })),
+        Err(errors) => {
+            write_reports(err, errors.iter().chain(catalog.invalid_models()))?;
+            Ok(None)
         }
-    };
-    let wiring_file = paths::wiring_file(&rack_file);
-    let cabling = match config::load_wiring(&wiring_file, &rack, &catalog) {
-        Ok(cabling) => cabling,
-        Err(error) => {
-            write_reports(err, iter::once(&error))?;
-            return Ok(None);
-        }
-    };
-    Ok(Some(Setup { catalog, rack, wiring_file, cabling }))
+    }
 }
 
 /// Writes the problems of `files`, each report after a blank line.
@@ -161,16 +146,16 @@ fn write_reports<'a>(
     Ok(())
 }
 
-/// Opens the built-in catalog with the user's models next to `rack_file`, if one is given.
-/// Returns `None` after reporting a user catalog that cannot be read.
+/// Opens the built-in catalog with the user's models of the configuration at `config`, if
+/// one is given. Returns `None` after reporting a user catalog that cannot be read.
 fn open_catalog(
-    rack_file: Option<&Path>,
+    config: Option<&Path>,
     locations: &Locations,
     err: &mut impl Write,
 ) -> io::Result<Option<Catalog>> {
     let mut catalog = Catalog::builtin();
-    if let Some(rack_file) = rack_file {
-        let user_dir = paths::user_catalog(rack_file);
+    if let Some(config) = config {
+        let user_dir = paths::user_catalog(config);
         if let Err(error) = catalog.add_dirs(&[&user_dir]) {
             writeln!(err, "rackctl: cannot read {}: {error}", locations.display(&user_dir))?;
             return Ok(None);

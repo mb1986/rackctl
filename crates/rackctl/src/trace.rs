@@ -16,7 +16,7 @@ pub struct TraceArgs {
     endpoint: String,
 }
 
-/// Runs `trace`. `config` is the rack file named with `-c`, if any.
+/// Runs `trace`. `config` is the configuration named with `-c`, if any.
 pub fn run(
     args: &TraceArgs,
     config: Option<PathBuf>,
@@ -26,12 +26,12 @@ pub fn run(
     let Some(setup) = load_setup(config, locations, &mut err)? else {
         return Ok(ExitCode::from(CONFIG_ERROR));
     };
-    let Some(cabling) = &setup.cabling else {
-        let file = locations.display(&setup.wiring_file);
-        writeln!(err, "rackctl: there is no wiring: {file} does not exist")?;
+    // The wiring is read for a single rack.
+    let (Some(cabling), [rack]) = (&setup.config.cabling, setup.config.layout.racks()) else {
+        writeln!(err, "rackctl: there is no wiring: the configuration has no `wiring` node")?;
         return Ok(ExitCode::from(CONFIG_ERROR));
     };
-    let socket = match cabling.find(&args.endpoint, &setup.rack, &setup.catalog) {
+    let socket = match cabling.find(&args.endpoint, rack, &setup.catalog) {
         Ok(socket) => socket,
         Err(problem) => {
             let help = problem.help().map_or_else(String::new, |help| format!("; {help}"));
@@ -40,7 +40,7 @@ pub fn run(
         }
     };
 
-    let name = |socket| endpoint_name(cabling.endpoint(socket), &setup.rack, &setup.catalog);
+    let name = |socket| endpoint_name(cabling.endpoint(socket), rack, &setup.catalog);
     let path: Vec<String> = cabling.path(socket).into_iter().map(name).collect();
     let mut out = io::stdout();
     if let [alone] = path.as_slice() {

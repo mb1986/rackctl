@@ -19,8 +19,9 @@ fn rackctl_check() -> Command {
     command
 }
 
-fn check(rack_file: &Path) -> Output {
-    rackctl_check().arg("-c").arg(rack_file).output().expect("rackctl runs")
+/// Checks the configuration at `config`, a directory or a file.
+fn check(config: &Path) -> Output {
+    rackctl_check().arg("-c").arg(config).output().expect("rackctl runs")
 }
 
 fn stdout(output: &Output) -> String {
@@ -49,8 +50,8 @@ fn summarizes_a_valid_rack() {
     let models = Catalog::builtin().ids().count();
     let expected = formatdoc! {r#"
         catalog  {models} models, all valid ({models} built-in, 0 user)
-        rack     {rack_file}: ok
-        wiring   none (no {wiring_file})
+        config   {rack_file}: ok, 1 file
+        wiring   none
 
         rack "lab", 12U
           devices  3: 1 server, 1 switch, 1 PDU
@@ -60,7 +61,6 @@ fn summarizes_a_valid_rack() {
           strips   pdu (left, front, U3-U12)
         "#,
         rack_file = rack_file.display(),
-        wiring_file = dir.path().join("wiring.kdl").display(),
     };
     assert_eq!(stdout(&output), expected);
     assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
@@ -90,15 +90,20 @@ fn counts_the_cables_of_the_wiring() {
     )
     .expect("write the wiring");
 
-    let output = check(&rack_file);
-    let line = format!("wiring   {}: ok, 3 cables (1 power, 2 net)", wiring_file.display());
-    assert!(stdout(&output).lines().any(|row| row == line), "{}", stdout(&output));
+    let output = check(dir.path());
+    let lines = [
+        format!("config   {}: ok, 2 files", dir.path().display()),
+        "wiring   3 cables (1 power, 2 net)".to_owned(),
+    ];
+    for line in lines {
+        assert!(stdout(&output).lines().any(|row| row == line), "{}", stdout(&output));
+    }
     assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
 
     fs::write(&wiring_file, "wiring { power pdu:25 srv:psu1; }").expect("write the wiring");
-    let output = check(&rack_file);
-    let line = format!("wiring   {}: 1 problem", wiring_file.display());
-    assert!(stdout(&output).lines().any(|row| row == line), "{}", stdout(&output));
+    let output = check(dir.path());
+    let line = format!("config   {}: 1 problem in 1 file", dir.path().display());
+    assert!(stdout(&output).ends_with(&format!("{line}\n")), "{}", stdout(&output));
     assert!(stderr(&output).contains("`pdu:25` does not exist: `pdu` has outlets 1-24"));
     assert_eq!(output.status.code(), Some(2));
 }
@@ -141,8 +146,9 @@ fn reports_problems_and_exits_with_code_2() {
     fs::write(dir.path().join("wiring.kdl"), "wiring { net ghost:1 b:nic1; }")
         .expect("write the wiring");
 
-    let output = check(&rack_file);
-    assert!(stdout(&output).ends_with(&format!("rack     {}: 1 problem\n", rack_file.display())));
+    let output = check(dir.path());
+    let line = format!("config   {}: 1 problem in 1 file\n", dir.path().display());
+    assert!(stdout(&output).ends_with(&line), "{}", stdout(&output));
     assert!(stderr(&output).contains("`b` overlaps `a` on U2"));
     assert!(!stderr(&output).contains("ghost"));
     assert_eq!(output.status.code(), Some(2));
@@ -212,9 +218,48 @@ fn reports_an_output_that_cannot_be_written() {
 }
 
 #[test]
-fn reports_a_missing_rack_file() {
+fn reports_a_missing_configuration() {
     let dir = tempfile::tempdir().expect("temporary directory");
     let output = check(&dir.path().join("rack.kdl"));
     assert!(stderr(&output).contains("cannot read the file"));
+    assert_eq!(output.status.code(), Some(2));
+
+    let output = check(dir.path());
+    assert!(stderr(&output).contains("there are no `.kdl` files in the directory"));
+    assert_eq!(output.status.code(), Some(2));
+}
+
+#[test]
+fn summarizes_each_rack_of_a_directory() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    fs::write(dir.path().join("office.kdl"), r#"rack "office" units=12"#).expect("write a rack");
+    fs::write(dir.path().join("lab.kdl"), r#"rack "lab" units=4"#).expect("write a rack");
+
+    let output = check(dir.path());
+    let stdout = stdout(&output);
+    let line = format!("config   {}: ok, 2 files", dir.path().display());
+    assert!(stdout.lines().any(|row| row == line), "{stdout}");
+    let headings: Vec<_> = stdout.lines().filter(|row| row.starts_with("rack \"")).collect();
+    assert_eq!(headings, ["rack \"lab\", 4U", "rack \"office\", 12U"]);
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+}
+
+#[test]
+fn counts_the_problems_of_every_file() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    fs::write(dir.path().join("a.kdl"), r#"rack "a" units=99"#).expect("write a rack");
+    fs::write(dir.path().join("b.kdl"), r#"rack "b" units=4; rack "a" units=4; shelf"#)
+        .expect("write a rack");
+
+    let output = check(dir.path());
+    let line = format!("config   {}: 3 problems in 2 files\n", dir.path().display());
+    assert!(stdout(&output).ends_with(&line), "{}", stdout(&output));
+    let stderr = stderr(&output);
+    assert!(stderr.contains("`units` must be between 1 and 60"));
+    assert!(stderr.contains("the rack name `a` is used more than once"));
+    assert!(
+        stderr.contains(&format!("first used in {}, line 1", dir.path().join("a.kdl").display()))
+    );
+    assert!(stderr.contains("unknown top-level node `shelf`"));
     assert_eq!(output.status.code(), Some(2));
 }

@@ -4,11 +4,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-/// Runs `rackctl trace` on `rack_file`, without configuration from the environment.
-fn trace(rack_file: &Path, endpoint: &str) -> Output {
+/// Runs `rackctl trace` on the configuration at `config`, a directory or a file, without
+/// configuration from the environment.
+fn trace(config: &Path, endpoint: &str) -> Output {
     Command::new(env!("CARGO_BIN_EXE_rackctl"))
         .arg("-c")
-        .arg(rack_file)
+        .arg(config)
         .args(["trace", endpoint])
         .env("NO_COLOR", "1")
         .env("HOME", "/nonexistent-home")
@@ -19,7 +20,7 @@ fn trace(rack_file: &Path, endpoint: &str) -> Output {
 }
 
 fn golden_rack() -> PathBuf {
-    [env!("CARGO_MANIFEST_DIR"), "../../tests/golden/rack/rack.kdl"].iter().collect()
+    [env!("CARGO_MANIFEST_DIR"), "../../tests/golden/rack"].iter().collect()
 }
 
 #[test]
@@ -61,9 +62,8 @@ fn reports_a_rack_without_wiring() {
         .expect("write the rack file");
     let output = trace(&rack_file, "a:mgmt");
     assert_eq!(output.status.code(), Some(2));
-    let wiring_file = dir.path().join("wiring.kdl");
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
-        format!("rackctl: there is no wiring: {} does not exist\n", wiring_file.display())
+        "rackctl: there is no wiring: the configuration has no `wiring` node\n"
     );
 }

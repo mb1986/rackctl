@@ -50,10 +50,10 @@ impl Locations {
         Some(base.join("rackctl"))
     }
 
-    /// Returns the rack file to use when `-c` is not given: `$RACKCTL_CONFIG`, or
-    /// `rack.kdl` in the configuration directory.
-    pub fn rack_file(&self) -> Option<PathBuf> {
-        self.rack_config.clone().or_else(|| Some(self.config_dir()?.join("rack.kdl")))
+    /// Returns the configuration to use when `-c` is not given: `$RACKCTL_CONFIG`, or the
+    /// configuration directory.
+    pub fn config_path(&self) -> Option<PathBuf> {
+        self.rack_config.clone().or_else(|| self.config_dir())
     }
 
     /// Formats `path` for display, writing the home directory as `~`.
@@ -65,14 +65,12 @@ impl Locations {
     }
 }
 
-/// Returns the directory of the user's own models for a rack file: `catalog/` next to it.
-pub fn user_catalog(rack_file: &Path) -> PathBuf {
-    rack_file.parent().unwrap_or_else(|| Path::new("")).join("catalog")
-}
-
-/// Returns the wiring file for a rack file: `wiring.kdl` next to it.
-pub fn wiring_file(rack_file: &Path) -> PathBuf {
-    rack_file.parent().unwrap_or_else(|| Path::new("")).join("wiring.kdl")
+/// Returns the directory of the user's own models: `catalog/` in the configuration
+/// directory, or next to a configuration file.
+pub fn user_catalog(config: &Path) -> PathBuf {
+    let dir =
+        if config.is_dir() { config } else { config.parent().unwrap_or_else(|| Path::new("")) };
+    dir.join("catalog")
 }
 
 #[cfg(test)]
@@ -86,31 +84,31 @@ mod tests {
     #[test]
     fn uses_rackctl_config_when_it_is_not_empty() {
         let with = |value: &str| {
-            Locations::new(Some("/home/u".into()), None, Some(value.into())).rack_file()
+            Locations::new(Some("/home/u".into()), None, Some(value.into())).config_path()
         };
-        assert_eq!(with("/srv/rack.kdl"), Some(PathBuf::from("/srv/rack.kdl")));
-        assert_eq!(with("rack.kdl"), Some(PathBuf::from("rack.kdl")));
-        assert_eq!(with(""), Some(PathBuf::from("/home/u/.config/rackctl/rack.kdl")));
+        assert_eq!(with("/srv/rack"), Some(PathBuf::from("/srv/rack")));
+        assert_eq!(with("lab.kdl"), Some(PathBuf::from("lab.kdl")));
+        assert_eq!(with(""), Some(PathBuf::from("/home/u/.config/rackctl")));
     }
 
     #[test]
     fn uses_the_xdg_config_home_first() {
         let locations = locations(Some("/home/u"), Some("/etc/xdg-u"));
-        assert_eq!(locations.rack_file(), Some(PathBuf::from("/etc/xdg-u/rackctl/rack.kdl")));
+        assert_eq!(locations.config_path(), Some(PathBuf::from("/etc/xdg-u/rackctl")));
     }
 
     #[test]
     fn falls_back_to_the_home_directory() {
-        let expected = Some(PathBuf::from("/home/u/.config/rackctl/rack.kdl"));
-        assert_eq!(locations(Some("/home/u"), None).rack_file(), expected);
-        assert_eq!(locations(Some("/home/u"), Some("")).rack_file(), expected);
-        assert_eq!(locations(Some("/home/u"), Some("relative")).rack_file(), expected);
+        let expected = Some(PathBuf::from("/home/u/.config/rackctl"));
+        assert_eq!(locations(Some("/home/u"), None).config_path(), expected);
+        assert_eq!(locations(Some("/home/u"), Some("")).config_path(), expected);
+        assert_eq!(locations(Some("/home/u"), Some("relative")).config_path(), expected);
     }
 
     #[test]
     fn finds_nothing_without_a_home() {
-        assert_eq!(locations(None, None).rack_file(), None);
-        assert_eq!(locations(Some("relative"), None).rack_file(), None);
+        assert_eq!(locations(None, None).config_path(), None);
+        assert_eq!(locations(Some("relative"), None).config_path(), None);
     }
 
     #[test]
@@ -125,20 +123,10 @@ mod tests {
     }
 
     #[test]
-    fn finds_the_user_catalog_next_to_the_rack_file() {
-        assert_eq!(
-            user_catalog(Path::new("/srv/rack/rack.kdl")),
-            PathBuf::from("/srv/rack/catalog")
-        );
-        assert_eq!(user_catalog(Path::new("rack.kdl")), PathBuf::from("catalog"));
-    }
-
-    #[test]
-    fn finds_the_wiring_next_to_the_rack_file() {
-        assert_eq!(
-            wiring_file(Path::new("/srv/rack/rack.kdl")),
-            PathBuf::from("/srv/rack/wiring.kdl")
-        );
-        assert_eq!(wiring_file(Path::new("rack.kdl")), PathBuf::from("wiring.kdl"));
+    fn finds_the_user_catalog_in_the_directory_or_next_to_the_file() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        assert_eq!(user_catalog(dir.path()), dir.path().join("catalog"));
+        assert_eq!(user_catalog(&dir.path().join("lab.kdl")), dir.path().join("catalog"));
+        assert_eq!(user_catalog(Path::new("lab.kdl")), PathBuf::from("catalog"));
     }
 }

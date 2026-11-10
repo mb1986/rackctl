@@ -1,5 +1,5 @@
-//! `rackctl check`: loads the catalog, the rack file and the wiring, reports every problem
-//! and summarizes the rack.
+//! `rackctl check`: loads the catalog and the configuration, reports every problem and
+//! summarizes each rack.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
@@ -8,16 +8,16 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use rackctl_core::catalog::{Catalog, Kind, Origin};
-use rackctl_core::config;
+use rackctl_core::config::{self, Config};
 use rackctl_core::kdl_reader::FileError;
 use rackctl_core::rack::{Placement, Rack};
 use rackctl_core::wiring::{Cabling, LinkKind};
 use textwrap::core::Word;
 use textwrap::{Options, WordSeparator, WordSplitter};
 
-use crate::paths::{self, Locations};
+use crate::paths::Locations;
 use crate::style::{ERROR, HEADING, LABEL, NOTE, OK};
-use crate::{CONFIG_ERROR, find_rack_file, open_catalog, write_reports};
+use crate::{CONFIG_ERROR, find_config, open_catalog, write_reports};
 
 /// The width that long lines of the summary are wrapped to.
 const WIDTH: usize = 80;
@@ -25,13 +25,13 @@ const WIDTH: usize = 80;
 /// The width of the label column.
 const LABEL_WIDTH: usize = 9;
 
-/// Runs the command. `config` is the rack file named with `-c`, if any.
+/// Runs the command. `config` is the configuration named with `-c`, if any.
 pub fn run(config: Option<PathBuf>, locations: &Locations) -> io::Result<ExitCode> {
     let mut err = io::stderr();
-    let Some(rack_file) = find_rack_file(config, locations, &mut err)? else {
+    let Some(path) = find_config(config, locations, &mut err)? else {
         return Ok(ExitCode::from(CONFIG_ERROR));
     };
-    let Some(catalog) = open_catalog(Some(&rack_file), locations, &mut err)? else {
+    let Some(catalog) = open_catalog(Some(&path), locations, &mut err)? else {
         return Ok(ExitCode::from(CONFIG_ERROR));
     };
 
@@ -39,69 +39,61 @@ pub fn run(config: Option<PathBuf>, locations: &Locations) -> io::Result<ExitCod
     let invalid_models = catalog.invalid_models();
     write_catalog(&mut out, &catalog, invalid_models.len())?;
 
-    let rack = config::load_rack(&rack_file, &catalog);
-    let rack_status = status(rack.as_ref().err());
-    row(&mut out, "", "rack", &format!("{}: {rack_status}", locations.display(&rack_file)))?;
-    // The wiring names the rack's devices, so it is checked only against a valid rack.
-    let wiring_file = paths::wiring_file(&rack_file);
-    let wiring = rack.as_ref().ok().map(|rack| config::load_wiring(&wiring_file, rack, &catalog));
-    if let Some(wiring) = &wiring {
-        write_wiring(&mut out, &locations.display(&wiring_file), wiring)?;
-    }
-    let wiring_error = wiring.as_ref().and_then(|wiring| wiring.as_ref().err());
-    if let Ok(rack) = &rack
-        && invalid_models.is_empty()
-        && wiring_error.is_none()
-    {
-        writeln!(out)?;
-        write_summary(&mut out, rack, &catalog)?;
-        return Ok(ExitCode::SUCCESS);
-    }
+    let loaded = config::load(&path, &catalog);
+    row(&mut out, "", "config", &format!("{}: {}", locations.display(&path), status(&loaded)))?;
+    let errors = match loaded {
+        Ok(config) => {
+            write_wiring(&mut out, config.cabling.as_ref())?;
+            if invalid_models.is_empty() {
+                for rack in config.layout.racks() {
+                    writeln!(out)?;
+                    write_summary(&mut out, rack, &catalog)?;
+                }
+                return Ok(ExitCode::SUCCESS);
+            }
+            Vec::new()
+        }
+        Err(errors) => errors,
+    };
     out.flush()?;
 
-    let failed = rack.as_ref().err().into_iter().chain(invalid_models).chain(wiring_error);
-    write_reports(&mut err, failed)?;
+    write_reports(&mut err, errors.iter().chain(invalid_models))?;
     Ok(ExitCode::from(CONFIG_ERROR))
 }
 
-/// Describes the result of loading a file: `ok`, or how many problems it has.
-fn status(error: Option<&FileError>) -> String {
-    error.map_or_else(
-        || format!("{OK}ok{OK:#}"),
-        |error| {
-            let count = plural(error.problems().len(), "problem", "problems");
-            format!("{ERROR}{count}{ERROR:#}")
-        },
-    )
+/// Describes the result of loading the configuration: `ok` with the number of files read,
+/// or the number of problems and of the files that have them.
+fn status(loaded: &Result<Config, Vec<FileError>>) -> String {
+    match loaded {
+        Ok(config) => format!("{OK}ok{OK:#}, {}", plural(config.files.len(), "file", "files")),
+        Err(errors) => {
+            let problems = errors.iter().map(|error| error.problems().len()).sum();
+            let problems = plural(problems, "problem", "problems");
+            let files = plural(errors.len(), "file", "files");
+            format!("{ERROR}{problems} in {files}{ERROR:#}")
+        }
+    }
 }
 
-/// Writes the wiring line: the cables of each type, no wiring file, or its problems.
-fn write_wiring(
-    out: &mut impl Write,
-    path: &str,
-    wiring: &Result<Option<Cabling>, FileError>,
-) -> io::Result<()> {
-    let value = match wiring {
-        Ok(None) => format!("{NOTE}none (no {path}){NOTE:#}"),
-        Ok(Some(cabling)) => {
-            let links = cabling.links();
-            let kinds: Vec<String> = [LinkKind::Power, LinkKind::Net, LinkKind::Mgmt]
-                .into_iter()
-                .map(|kind| (kind, links.iter().filter(|link| link.kind == kind).count()))
-                .filter(|&(_, count)| count > 0)
-                .map(|(kind, count)| format!("{count} {}", <&str>::from(kind)))
-                .collect();
-            let cables = plural(links.len(), "cable", "cables");
-            let kinds = if kinds.is_empty() {
-                String::new()
-            } else {
-                format!(" {NOTE}({}){NOTE:#}", kinds.join(", "))
-            };
-            format!("{path}: {}, {cables}{kinds}", status(None))
-        }
-        Err(error) => format!("{path}: {}", status(Some(error))),
+/// Writes the wiring line: the cables of each type, or that there is no wiring.
+fn write_wiring(out: &mut impl Write, cabling: Option<&Cabling>) -> io::Result<()> {
+    let Some(cabling) = cabling else {
+        return row(out, "", "wiring", &format!("{NOTE}none{NOTE:#}"));
     };
-    row(out, "", "wiring", &value)
+    let links = cabling.links();
+    let kinds: Vec<String> = [LinkKind::Power, LinkKind::Net, LinkKind::Mgmt]
+        .into_iter()
+        .map(|kind| (kind, links.iter().filter(|link| link.kind == kind).count()))
+        .filter(|&(_, count)| count > 0)
+        .map(|(kind, count)| format!("{count} {}", <&str>::from(kind)))
+        .collect();
+    let cables = plural(links.len(), "cable", "cables");
+    let kinds = if kinds.is_empty() {
+        String::new()
+    } else {
+        format!(" {NOTE}({}){NOTE:#}", kinds.join(", "))
+    };
+    row(out, "", "wiring", &format!("{cables}{kinds}"))
 }
 
 fn write_catalog(out: &mut impl Write, catalog: &Catalog, invalid: usize) -> io::Result<()> {
