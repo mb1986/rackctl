@@ -15,6 +15,13 @@ use crate::{IDENTIFIER_RULE, is_identifier};
 /// The largest number of units a rack may have.
 pub const MAX_UNITS: u8 = 60;
 
+/// The racks of a configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Layout {
+    /// Racks in the order of their names.
+    racks: Vec<Rack>,
+}
+
 /// A rack and the devices mounted in it, as described in `rack.kdl`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rack {
@@ -146,6 +153,63 @@ impl fmt::Display for UnitRange {
 
 /// The nodes a rack may contain, used to suggest corrections for misspelled ones.
 const NODES: &[&str] = &["device"];
+
+impl Layout {
+    /// Parses the `rack` nodes of a configuration file.
+    ///
+    /// # Errors
+    ///
+    /// Returns every problem found in the file.
+    pub fn parse(text: &str) -> Result<Self, Vec<Problem>> {
+        let document = kdl_reader::parse(text)?;
+        let mut problems = Vec::new();
+        let mut racks = Vec::new();
+        let mut names = HashMap::new();
+        let mut found = false;
+        for node in document.nodes() {
+            let key = node.name().value();
+            if key != "rack" {
+                problems.push(
+                    Problem::new(format!("unexpected top-level node `{key}`"), node.name().span())
+                        .with_help("only `rack { ... }` nodes are read from this file"),
+                );
+                continue;
+            }
+            found = true;
+            problems.extend(repeated(&mut names, node, "rack name"));
+            racks.extend(read_rack(node, &mut problems));
+        }
+        if !found {
+            problems.push(Problem::new(
+                "the file does not contain a `rack { ... }` node",
+                SourceSpan::from(0..0),
+            ));
+        }
+        if !problems.is_empty() {
+            return Err(problems);
+        }
+        racks.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(Self { racks })
+    }
+
+    /// Returns the racks in the order of their names.
+    #[must_use]
+    pub fn racks(&self) -> &[Rack] {
+        &self.racks
+    }
+
+    /// Returns the rack called `name`.
+    #[must_use]
+    pub fn rack(&self, name: &str) -> Option<&Rack> {
+        self.racks.iter().find(|rack| rack.name == name)
+    }
+
+    /// Checks every rack against the catalog, as [`Rack::check`] does.
+    #[must_use]
+    pub fn check(&self, catalog: &Catalog) -> Vec<Problem> {
+        self.racks.iter().flat_map(|rack| rack.check(catalog)).collect()
+    }
+}
 
 impl Rack {
     /// Parses a rack file.
@@ -351,7 +415,7 @@ fn read_rack(node: &KdlNode, problems: &mut Vec<Problem>) -> Option<Rack> {
     }
 
     let mut devices = Vec::new();
-    let mut ids: HashMap<&str, SourceSpan> = HashMap::new();
+    let mut ids = HashMap::new();
     for child in block.map(KdlDocument::nodes).unwrap_or_default() {
         let key = child.name().value();
         if key != "device" {
@@ -363,25 +427,35 @@ fn read_rack(node: &KdlNode, problems: &mut Vec<Problem>) -> Option<Rack> {
         }
         // Ids are compared even for devices with other problems, so that a repeated id is
         // reported however many mistakes the devices have.
-        if let Some(id) = child.entry(0).and_then(|entry| entry.value().as_string()) {
-            let span = span_of(child, 0);
-            match ids.entry(id) {
-                Entry::Occupied(first) => problems.push(
-                    Problem::new(format!("the device id `{id}` is used more than once"), span)
-                        .with_label("used again here")
-                        .with_label_at(*first.get(), "first used here"),
-                ),
-                Entry::Vacant(slot) => {
-                    slot.insert(span);
-                }
-            }
-        }
+        problems.extend(repeated(&mut ids, child, "device id"));
         if let Some(device) = read_device(child, units, problems) {
             devices.push(device);
         }
     }
 
     Some(Rack { name: name?, units: units?, devices })
+}
+
+/// Reports the first argument of `node` when a node before it has the same one, recorded in
+/// `seen`. `what` names the argument, such as `device id`.
+fn repeated<'n>(
+    seen: &mut HashMap<&'n str, SourceSpan>,
+    node: &'n KdlNode,
+    what: &str,
+) -> Option<Problem> {
+    let name = node.entry(0)?.value().as_string()?;
+    let span = span_of(node, 0);
+    match seen.entry(name) {
+        Entry::Occupied(first) => Some(
+            Problem::new(format!("the {what} `{name}` is used more than once"), span)
+                .with_label("used again here")
+                .with_label_at(*first.get(), "first used here"),
+        ),
+        Entry::Vacant(slot) => {
+            slot.insert(span);
+            None
+        }
+    }
 }
 
 /// Reads a `device` node. `units` is the rack's height, when it is known.
@@ -805,5 +879,70 @@ mod tests {
             messages(r#"rack "a" units=36; rack "b" units=42"#),
             ["unexpected top-level node `rack`"]
         );
+    }
+
+    fn layout_messages(text: &str) -> Vec<String> {
+        let problems = Layout::parse(text).expect_err("invalid layout");
+        problems.iter().map(|problem| problem.message().to_owned()).collect()
+    }
+
+    #[test]
+    fn reads_every_rack_of_the_file() {
+        let layout = Layout::parse(
+            r#"rack "b" units=12 { device "pdu" model="x/strip" mount="left" }
+               rack "a" units=36 { device "pdu" model="x/strip" mount="left" }"#,
+        )
+        .expect("valid layout");
+        let racks: Vec<_> =
+            layout.racks().iter().map(|rack| (rack.name.as_str(), rack.units)).collect();
+        assert_eq!(racks, [("a", 36), ("b", 12)]);
+        assert_eq!(layout.racks()[1].devices[0].id, "pdu");
+    }
+
+    #[test]
+    fn finds_a_rack_by_its_name() {
+        let layout =
+            Layout::parse(r#"rack "b" units=12; rack "a" units=36"#).expect("valid layout");
+        assert_eq!(layout.rack("b").map(|rack| rack.units), Some(12));
+        assert_eq!(layout.rack("c"), None);
+    }
+
+    #[test]
+    fn reports_a_rack_name_used_twice() {
+        let text = r#"rack "a" units=36; rack "b" units=12; rack "a" units=12"#;
+        let problems = Layout::parse(text).expect_err("repeated name");
+        assert_eq!(problems.len(), 1);
+        assert_eq!(problems[0].message(), "the rack name `a` is used more than once");
+        assert_eq!(problems[0].labels().expect("labels").count(), 2);
+    }
+
+    #[test]
+    fn reports_the_problems_of_every_rack() {
+        assert_eq!(
+            layout_messages(
+                r#"rack "a" units=36 { device "x" model="x/a" }
+                   rack "b" units=99
+                   wiring"#
+            ),
+            [
+                "`device` is missing the property `u`",
+                "`units` must be between 1 and 60",
+                "unexpected top-level node `wiring`",
+            ]
+        );
+        assert_eq!(layout_messages(""), ["the file does not contain a `rack { ... }` node"]);
+    }
+
+    #[test]
+    fn checks_every_rack_against_the_catalog() {
+        let (_dir, catalog) = test_catalog();
+        let layout = Layout::parse(
+            r#"rack "a" units=36 { device "x" model="x/server-5u" u=1 }
+               rack "b" units=4 { device "x" model="x/server-5u" u=1 }"#,
+        )
+        .expect("valid layout");
+        let messages: Vec<_> =
+            layout.check(&catalog).iter().map(|problem| problem.message().to_owned()).collect();
+        assert_eq!(messages, ["`x` does not fit in the rack: it covers U1-U5"]);
     }
 }

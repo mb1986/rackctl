@@ -6,8 +6,23 @@ use std::path::Path;
 
 use crate::catalog::Catalog;
 use crate::kdl_reader::FileError;
-use crate::rack::Rack;
+use crate::rack::{Layout, Rack};
 use crate::wiring::{Cabling, Wiring};
+
+/// Loads the racks of the configuration file at `path` and checks them against `catalog`.
+///
+/// Problems in model files are reported by [`Catalog::invalid_models`].
+///
+/// # Errors
+///
+/// Returns the problems found in the file.
+pub fn load_layout(path: &Path, catalog: &Catalog) -> Result<Layout, FileError> {
+    let name = path.display().to_string();
+    let text = fs::read_to_string(path).map_err(|error| FileError::unreadable(&name, &error))?;
+    let layout = Layout::parse(&text).map_err(|problems| FileError::new(&name, &text, problems))?;
+    let problems = layout.check(catalog);
+    if problems.is_empty() { Ok(layout) } else { Err(FileError::new(name, text, problems)) }
+}
 
 /// Loads the rack file at `path` and checks it against `catalog`.
 ///
@@ -65,6 +80,32 @@ mod tests {
 
         let rack = load_rack(&dir.path().join("rack.kdl"), &catalog).expect("valid rack");
         assert_eq!(rack.devices.len(), 1);
+    }
+
+    #[test]
+    fn loads_every_rack_and_checks_each() {
+        let dir = dir_with(&[
+            ("catalog/x/server.kdl", SERVER),
+            (
+                "rack.kdl",
+                r#"rack "a" units=4 { device "s" model="x/server" u=1 }
+                   rack "b" units=4 { device "s" model="x/server" u=4 }"#,
+            ),
+        ]);
+        let catalog = Catalog::open(&[dir.path().join("catalog")]).expect("readable catalog");
+        let rack_file = dir.path().join("rack.kdl");
+
+        let layout = load_layout(&rack_file, &catalog).expect("valid layout");
+        assert_eq!(layout.racks().len(), 2);
+
+        fs::write(
+            &rack_file,
+            r#"rack "a" units=4; rack "b" units=4 { device "s" model="x/s" u=1 }"#,
+        )
+        .expect("write the file");
+        let error = load_layout(&rack_file, &catalog).expect_err("invalid");
+        let messages: Vec<_> = error.problems().iter().map(Problem::message).collect();
+        assert_eq!(messages, ["unknown model `x/s`"]);
     }
 
     #[test]
