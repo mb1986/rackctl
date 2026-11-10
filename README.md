@@ -20,9 +20,11 @@ control and the terminal UI are not available yet.
 ## Usage
 
 ```sh
-rackctl check              # check ~/.config/rackctl/rack.kdl and summarize the rack
-rackctl check -c rack.kdl  # check another rack file
-rackctl rack               # draw the rack's front view
+rackctl check              # check the configuration in ~/.config/rackctl and summarize each rack
+rackctl check -c lab/      # check the configuration in another directory
+rackctl check -c lab.kdl   # check a configuration kept in a single file
+rackctl rack               # draw the front view of each rack
+rackctl rack homelab       # draw one rack
 rackctl trace server:nic1  # follow the cables from an endpoint
 ```
 
@@ -31,7 +33,10 @@ with its location in the file.
 
 ## Configuration
 
-The rack is described in `~/.config/rackctl/rack.kdl`, written in [KDL](https://kdl.dev):
+The configuration is written in [KDL](https://kdl.dev). rackctl reads every `.kdl` file in
+`~/.config/rackctl/`, subdirectories included, and each top-level node says what it holds,
+so the configuration can be split into files in any way, or kept in one. A `rack` node
+describes a rack, and there can be several:
 
 ```kdl
 rack "homelab" units=36 {
@@ -48,8 +53,8 @@ Each `model` refers to the device catalog in [`catalog/`](./catalog/), which des
 hardware: its height, depth, parts and faceplate. Models in `~/.config/rackctl/catalog/`
 add to the built-in ones or replace them.
 
-The cables go in `wiring.kdl` next to the rack file. Each line is one path, and a patch
-panel port names its side: `b` (back) or `f` (front), or both when a path passes through it.
+The cables go in a `wiring` node. Each line is one path, and a patch panel port names its
+side: `b` (back) or `f` (front), or both when a path passes through it.
 
 ```kdl
 wiring {
