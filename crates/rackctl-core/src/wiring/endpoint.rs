@@ -13,7 +13,7 @@ use crate::rack::Rack;
 pub struct EndpointRef {
     pub device: String,
     pub name: EndpointName,
-    /// Location of the endpoint in the wiring file.
+    /// Location of the endpoint in its file.
     pub span: SourceSpan,
 }
 

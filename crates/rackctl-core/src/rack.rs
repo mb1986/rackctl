@@ -22,7 +22,7 @@ pub struct Layout {
     racks: Vec<Rack>,
 }
 
-/// A rack and the devices mounted in it, as described in `rack.kdl`.
+/// A rack and the devices mounted in it, as described in a `rack` node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rack {
     /// Name of the rack, for example `homelab`.
@@ -46,11 +46,11 @@ pub struct Device {
     pub placement: Placement,
     /// Which side of the rack the device is mounted on.
     pub face: Face,
-    /// Locations in the rack file, used to point at problems.
+    /// Locations in the rack's file, used to point at problems.
     pub spans: DeviceSpans,
 }
 
-/// Locations of a device's values in the rack file.
+/// Locations of a device's values in its file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeviceSpans {
     /// The whole `device` node.
@@ -178,7 +178,7 @@ impl Layout {
 }
 
 impl Rack {
-    /// Parses a rack file.
+    /// Parses a text that holds a single `rack` node.
     ///
     /// # Errors
     ///

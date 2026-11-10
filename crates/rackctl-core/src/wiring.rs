@@ -1,4 +1,4 @@
-//! Wiring: the cables between devices, as described in `wiring.kdl`.
+//! Wiring: the cables between devices, as described in a `wiring` node.
 
 mod cabling;
 mod endpoint;
@@ -14,7 +14,7 @@ pub use endpoint::{EndpointName, EndpointRef, PatchSide, endpoint_name, parse_en
 
 use crate::kdl_reader::{self, FileId, NodeReader, Problem, span_of};
 
-/// The cables of `wiring.kdl` as written, before their endpoints are looked up in the rack.
+/// The cables of a `wiring` node as written, before their endpoints are looked up in the rack.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Wiring {
     /// The statements in the order they appear in the file.
@@ -29,7 +29,7 @@ pub struct Wiring {
 pub struct CablePath {
     pub kind: LinkKind,
     pub endpoints: Vec<EndpointRef>,
-    /// Location of the statement in the wiring file.
+    /// Location of the statement in its file.
     pub span: SourceSpan,
 }
 
@@ -46,7 +46,7 @@ pub enum LinkKind {
 }
 
 impl Wiring {
-    /// Parses a wiring file.
+    /// Parses a text that holds a single `wiring` node.
     ///
     /// # Errors
     ///

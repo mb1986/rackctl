@@ -61,7 +61,7 @@ impl Wiring {
     ///
     /// # Errors
     ///
-    /// Returns every problem found, located in the wiring file.
+    /// Returns every problem found, located in the wiring's file.
     pub fn resolve(&self, rack: &Rack, catalog: &Catalog) -> Result<Cabling, Vec<Problem>> {
         let devices = Devices::new(rack, catalog);
         let endpoints: Vec<DeviceEndpoints> = devices
