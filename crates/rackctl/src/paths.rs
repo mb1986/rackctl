@@ -1,9 +1,9 @@
-//! Locating the configuration files.
+//! Locating the configuration.
 //!
 //! The configuration directory is `$XDG_CONFIG_HOME/rackctl`, or `~/.config/rackctl` when
-//! `$XDG_CONFIG_HOME` is not set. It holds the rack file, `rack.kdl`, and the user's own
-//! models in `catalog/`. `$RACKCTL_CONFIG` names a different rack file, and the `-c` option,
-//! handled by the command-line parser, overrides both.
+//! `$XDG_CONFIG_HOME` is not set. It holds the configuration files and the user's own models
+//! in `catalog/`. `$RACKCTL_CONFIG` names another directory or a single file, and the `-c`
+//! option, handled by the command-line parser, overrides both.
 
 use std::env;
 use std::ffi::OsString;
