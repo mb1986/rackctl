@@ -157,32 +157,6 @@ impl fmt::Display for UnitRange {
 const NODES: &[&str] = &["device"];
 
 impl Layout {
-    /// Parses the `rack` nodes of a configuration file.
-    ///
-    /// # Errors
-    ///
-    /// Returns every problem found in the file.
-    pub fn parse(text: &str) -> Result<Self, Vec<Problem>> {
-        let document = kdl_reader::parse(text)?;
-        let mut problems = Vec::new();
-        let mut racks = Vec::new();
-        let mut names = HashMap::new();
-        let mut found = false;
-        for node in document.nodes() {
-            if node.name().value() != "rack" {
-                problems.push(prb::unexpected_top_level(node));
-                continue;
-            }
-            found = true;
-            problems.extend(repeated(&mut names, node, "rack name"));
-            racks.extend(read_rack(node, FileId::default(), &mut problems));
-        }
-        if !found {
-            problems.push(prb::no_rack());
-        }
-        if problems.is_empty() { Ok(Self::new(racks)) } else { Err(problems) }
-    }
-
     /// Creates the layout of `racks`, whose names are all different.
     #[must_use]
     pub fn new(mut racks: Vec<Rack>) -> Self {
@@ -200,12 +174,6 @@ impl Layout {
     #[must_use]
     pub fn rack(&self, name: &str) -> Option<&Rack> {
         self.racks.iter().find(|rack| rack.name == name)
-    }
-
-    /// Checks every rack against the catalog, as [`Rack::check`] does.
-    #[must_use]
-    pub fn check(&self, catalog: &Catalog) -> Vec<Problem> {
-        self.racks.iter().flat_map(|rack| rack.check(catalog)).collect()
     }
 }
 
@@ -452,16 +420,6 @@ mod prb {
     use crate::IDENTIFIER_RULE;
     use crate::catalog::Catalog;
     use crate::kdl_reader::{Problem, span_of};
-
-    pub(super) fn unexpected_top_level(node: &KdlNode) -> Problem {
-        let key = node.name().value();
-        Problem::new(format!("unexpected top-level node `{key}`"), node.name().span())
-            .with_help("only `rack { ... }` nodes are read from this file")
-    }
-
-    pub(super) fn no_rack() -> Problem {
-        Problem::new("the file does not contain a `rack { ... }` node", SourceSpan::from(0..0))
-    }
 
     pub(super) fn units_out_of_range(node: &KdlNode) -> Problem {
         Problem::new(format!("`units` must be between 1 and {MAX_UNITS}"), span_of(node, "units"))
@@ -942,68 +900,15 @@ mod tests {
         );
     }
 
-    fn layout_messages(text: &str) -> Vec<String> {
-        let problems = Layout::parse(text).expect_err("invalid layout");
-        problems.iter().map(|problem| problem.message().to_owned()).collect()
-    }
-
     #[test]
-    fn reads_every_rack_of_the_file() {
-        let layout = Layout::parse(
-            r#"rack "b" units=12 { device "pdu" model="x/strip" mount="left" }
-               rack "a" units=36 { device "pdu" model="x/strip" mount="left" }"#,
-        )
-        .expect("valid layout");
+    fn keeps_the_racks_of_a_layout_by_name() {
+        let rack = |text| Rack::parse(text).expect("valid rack");
+        let layout = Layout::new(vec![rack(r#"rack "b" units=12"#), rack(r#"rack "a" units=36"#)]);
+
         let racks: Vec<_> =
             layout.racks().iter().map(|rack| (rack.name.as_str(), rack.units)).collect();
         assert_eq!(racks, [("a", 36), ("b", 12)]);
-        assert_eq!(layout.racks()[1].devices[0].id, "pdu");
-    }
-
-    #[test]
-    fn finds_a_rack_by_its_name() {
-        let layout =
-            Layout::parse(r#"rack "b" units=12; rack "a" units=36"#).expect("valid layout");
         assert_eq!(layout.rack("b").map(|rack| rack.units), Some(12));
         assert_eq!(layout.rack("c"), None);
-    }
-
-    #[test]
-    fn reports_a_rack_name_used_twice() {
-        let text = r#"rack "a" units=36; rack "b" units=12; rack "a" units=12"#;
-        let problems = Layout::parse(text).expect_err("repeated name");
-        assert_eq!(problems.len(), 1);
-        assert_eq!(problems[0].message(), "the rack name `a` is used more than once");
-        assert_eq!(problems[0].labels().expect("labels").count(), 2);
-    }
-
-    #[test]
-    fn reports_the_problems_of_every_rack() {
-        assert_eq!(
-            layout_messages(
-                r#"rack "a" units=36 { device "x" model="x/a" }
-                   rack "b" units=99
-                   wiring"#
-            ),
-            [
-                "`device` is missing the property `u`",
-                "`units` must be between 1 and 60",
-                "unexpected top-level node `wiring`",
-            ]
-        );
-        assert_eq!(layout_messages(""), ["the file does not contain a `rack { ... }` node"]);
-    }
-
-    #[test]
-    fn checks_every_rack_against_the_catalog() {
-        let (_dir, catalog) = test_catalog();
-        let layout = Layout::parse(
-            r#"rack "a" units=36 { device "x" model="x/server-5u" u=1 }
-               rack "b" units=4 { device "x" model="x/server-5u" u=1 }"#,
-        )
-        .expect("valid layout");
-        let messages: Vec<_> =
-            layout.check(&catalog).iter().map(|problem| problem.message().to_owned()).collect();
-        assert_eq!(messages, ["`x` does not fit in the rack: it covers U1-U5"]);
     }
 }
