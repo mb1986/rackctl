@@ -20,6 +20,32 @@ pub const MAX_UNITS: u8 = 60;
 pub struct Layout {
     /// Racks in the order of their names.
     racks: Vec<Rack>,
+    /// The id of each rack's first device, followed by the number of devices.
+    starts: Vec<usize>,
+    /// The devices carrying each name, in the order of their ids.
+    names: HashMap<String, Vec<DeviceId>>,
+}
+
+/// A device of a layout: its position among all the devices, rack after rack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct DeviceId(pub usize);
+
+/// A device as written: its name, after its rack's name and a `.` when the rack is given.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeviceRef<'a> {
+    pub rack: Option<&'a str>,
+    pub name: &'a str,
+}
+
+impl<'a> DeviceRef<'a> {
+    /// Reads `device` or `rack.device`.
+    #[must_use]
+    pub fn parse(text: &'a str) -> Self {
+        match text.split_once('.') {
+            Some((rack, name)) => Self { rack: Some(rack), name },
+            None => Self { rack: None, name: text },
+        }
+    }
 }
 
 /// A rack and the devices mounted in it, as described in a `rack` node.
@@ -161,7 +187,18 @@ impl Layout {
     #[must_use]
     pub fn new(mut racks: Vec<Rack>) -> Self {
         racks.sort_by(|a, b| a.name.cmp(&b.name));
-        Self { racks }
+        let mut starts = Vec::with_capacity(racks.len() + 1);
+        let mut names = HashMap::<String, Vec<DeviceId>>::new();
+        let mut next = 0;
+        for rack in &racks {
+            starts.push(next);
+            for device in &rack.devices {
+                names.entry(device.id.clone()).or_default().push(DeviceId(next));
+                next += 1;
+            }
+        }
+        starts.push(next);
+        Self { racks, starts, names }
     }
 
     /// Returns the racks in the order of their names.
@@ -173,7 +210,82 @@ impl Layout {
     /// Returns the rack called `name`.
     #[must_use]
     pub fn rack(&self, name: &str) -> Option<&Rack> {
-        self.racks.iter().find(|rack| rack.name == name)
+        self.rack_index(name).map(|index| &self.racks[index])
+    }
+
+    fn rack_index(&self, name: &str) -> Option<usize> {
+        self.racks.binary_search_by(|rack| rack.name.as_str().cmp(name)).ok()
+    }
+
+    /// Returns every device in the order of the ids.
+    pub fn devices(&self) -> impl Iterator<Item = &Device> {
+        self.racks.iter().flat_map(|rack| &rack.devices)
+    }
+
+    /// Returns the device `id` with its rack.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `id` is not a device of this layout.
+    #[must_use]
+    pub fn device(&self, id: DeviceId) -> (&Rack, &Device) {
+        // The last rack that starts at or before the id; empty racks before it start there too.
+        let rack = self.starts.partition_point(|&start| start <= id.0) - 1;
+        (&self.racks[rack], &self.racks[rack].devices[id.0 - self.starts[rack]])
+    }
+
+    /// Names the device `id`: by its name alone when there is one rack, otherwise as
+    /// `rack.device`.
+    #[must_use]
+    pub fn device_name(&self, id: DeviceId) -> String {
+        let (rack, device) = self.device(id);
+        if self.racks.len() == 1 {
+            device.id.clone()
+        } else {
+            format!("{}.{}", rack.name, device.id)
+        }
+    }
+
+    /// Finds the device written as `reference` at `span`.
+    ///
+    /// A name with its rack means that rack's device. A name alone means the device of
+    /// `default_rack` when one is given, and otherwise the device of the only rack that has
+    /// one of that name.
+    ///
+    /// # Errors
+    ///
+    /// Returns why the reference does not name one device.
+    pub fn find_device(
+        &self,
+        reference: DeviceRef<'_>,
+        default_rack: Option<&str>,
+        span: SourceSpan,
+    ) -> Result<DeviceId, Problem> {
+        let name = reference.name;
+        let matches = self.names.get(name).map_or(&[] as &[DeviceId], Vec::as_slice);
+        let Some(rack_name) = reference.rack.or(default_rack) else {
+            return match matches {
+                [id] => Ok(*id),
+                [] => {
+                    let ids = self.devices().map(|device| device.id.as_str());
+                    Err(prb::unknown_device(name, span, self.racks.len() > 1, ids))
+                }
+                ids => {
+                    let racks: Vec<_> =
+                        ids.iter().map(|&id| self.device(id).0.name.as_str()).collect();
+                    Err(prb::ambiguous_device(name, span, &racks))
+                }
+            };
+        };
+        let Some(rack) = self.rack_index(rack_name) else {
+            let names = self.racks.iter().map(|rack| rack.name.as_str());
+            return Err(prb::unknown_rack(rack_name, span, names));
+        };
+        let ids = self.starts[rack]..self.starts[rack + 1];
+        matches.iter().copied().find(|id| ids.contains(&id.0)).ok_or_else(|| {
+            let ids = self.racks[rack].devices.iter().map(|device| device.id.as_str());
+            prb::unknown_device_in(name, rack_name, span, ids)
+        })
     }
 }
 
@@ -420,6 +532,50 @@ mod prb {
     use crate::IDENTIFIER_RULE;
     use crate::catalog::Catalog;
     use crate::kdl_reader::{Problem, span_of};
+
+    pub(super) fn unknown_rack<'c>(
+        name: &str,
+        span: SourceSpan,
+        racks: impl IntoIterator<Item = &'c str>,
+    ) -> Problem {
+        Problem::new(format!("unknown rack `{name}`"), span)
+            .with_label("not in the configuration")
+            .with_suggestion(name, racks)
+    }
+
+    /// `several` tells whether the configuration has more than one rack. `ids` are the
+    /// devices to suggest from.
+    pub(super) fn unknown_device<'c>(
+        name: &str,
+        span: SourceSpan,
+        several: bool,
+        ids: impl IntoIterator<Item = &'c str>,
+    ) -> Problem {
+        Problem::new(format!("unknown device `{name}`"), span)
+            .with_label(if several { "not in any rack" } else { "not in the rack" })
+            .with_suggestion(name, ids)
+    }
+
+    /// `ids` are the devices of the rack, to suggest from.
+    pub(super) fn unknown_device_in<'c>(
+        name: &str,
+        rack: &str,
+        span: SourceSpan,
+        ids: impl IntoIterator<Item = &'c str>,
+    ) -> Problem {
+        Problem::new(format!("unknown device `{rack}.{name}`"), span)
+            .with_label(format!("not in the rack `{rack}`"))
+            .with_suggestion(name, ids)
+    }
+
+    /// `racks` are the racks that have a device called `name`, at least two.
+    pub(super) fn ambiguous_device(name: &str, span: SourceSpan, racks: &[&str]) -> Problem {
+        let full: Vec<_> = racks.iter().map(|rack| format!("`{rack}.{name}`")).collect();
+        let (last, others) = full.split_last().expect("at least two racks");
+        Problem::new(format!("`{name}` is in several racks"), span)
+            .with_label("which one?")
+            .with_help(format!("write {} or {last}", others.join(", ")))
+    }
 
     pub(super) fn units_out_of_range(node: &KdlNode) -> Problem {
         Problem::new(format!("`units` must be between 1 and {MAX_UNITS}"), span_of(node, "units"))
@@ -897,6 +1053,118 @@ mod tests {
         assert_eq!(
             messages(r#"rack "a" units=36; rack "b" units=42"#),
             ["unexpected top-level node `rack`"]
+        );
+    }
+
+    /// The layout of racks, each written as a `rack` node.
+    fn layout(racks: &[&str]) -> Layout {
+        Layout::new(racks.iter().map(|text| Rack::parse(text).expect("valid rack")).collect())
+    }
+
+    /// The racks `lab` (devices `sw` and `srv`), `office` (`sw`) and the empty `attic`.
+    fn three_racks() -> Layout {
+        layout(&[
+            r#"rack "office" units=4 { device "sw" model="x/switch" u=1 }"#,
+            r#"rack "lab" units=4 {
+                device "sw" model="x/switch" u=1
+                device "srv" model="x/server" u=2
+            }"#,
+            r#"rack "attic" units=4"#,
+        ])
+    }
+
+    /// Finds `text` in [`three_racks`] and names the device found, or gives the message, the
+    /// label and the help of the problem.
+    fn find(text: &str, default_rack: Option<&str>) -> Result<String, (String, String, String)> {
+        let layout = three_racks();
+        let span = SourceSpan::from(0..text.len());
+        match layout.find_device(DeviceRef::parse(text), default_rack, span) {
+            Ok(id) => Ok(layout.device_name(id)),
+            Err(problem) => {
+                let label = problem.labels().and_then(|mut labels| labels.next());
+                let label = label.and_then(|label| label.label().map(str::to_owned));
+                Err((
+                    problem.message().to_owned(),
+                    label.unwrap_or_default(),
+                    problem.help().unwrap_or_default().to_owned(),
+                ))
+            }
+        }
+    }
+
+    fn not_found(message: &str, label: &str, help: &str) -> (String, String, String) {
+        (message.to_owned(), label.to_owned(), help.to_owned())
+    }
+
+    #[test]
+    fn numbers_the_devices_rack_after_rack() {
+        let layout = three_racks();
+        let names: Vec<_> = (0..3).map(|id| layout.device_name(DeviceId(id))).collect();
+        assert_eq!(names, ["lab.sw", "lab.srv", "office.sw"]);
+        assert_eq!(layout.devices().count(), 3);
+        // The empty rack `attic` comes first and takes no id.
+        assert_eq!(layout.device(DeviceId(0)).0.name, "lab");
+    }
+
+    #[test]
+    fn names_a_device_alone_when_there_is_one_rack() {
+        let layout = layout(&[r#"rack "lab" units=4 { device "sw" model="x/switch" u=1 }"#]);
+        assert_eq!(layout.device_name(DeviceId(0)), "sw");
+    }
+
+    #[test]
+    fn finds_a_device_by_its_rack_and_name() {
+        assert_eq!(find("office.sw", None), Ok("office.sw".to_owned()));
+        assert_eq!(find("lab.sw", Some("office")), Ok("lab.sw".to_owned()));
+    }
+
+    #[test]
+    fn finds_a_name_that_one_rack_has() {
+        assert_eq!(find("srv", None), Ok("lab.srv".to_owned()));
+    }
+
+    #[test]
+    fn finds_a_name_in_the_default_rack_only() {
+        assert_eq!(find("sw", Some("office")), Ok("office.sw".to_owned()));
+        assert_eq!(
+            find("srv", Some("office")),
+            Err(not_found("unknown device `office.srv`", "not in the rack `office`", ""))
+        );
+    }
+
+    #[test]
+    fn reports_a_name_that_several_racks_have() {
+        assert_eq!(
+            find("sw", None),
+            Err(not_found(
+                "`sw` is in several racks",
+                "which one?",
+                "write `lab.sw` or `office.sw`"
+            ))
+        );
+    }
+
+    #[test]
+    fn reports_unknown_racks_and_devices() {
+        assert_eq!(
+            find("labb.sw", None),
+            Err(not_found(
+                "unknown rack `labb`",
+                "not in the configuration",
+                "did you mean `lab`?"
+            ))
+        );
+        assert_eq!(
+            find("lab.sv", None),
+            Err(not_found(
+                "unknown device `lab.sv`",
+                "not in the rack `lab`",
+                "did you mean `sw`?"
+            ))
+        );
+        assert_eq!(
+            find("srw", None),
+            Err(not_found("unknown device `srw`", "not in any rack", "did you mean `sw`?"))
         );
     }
 
