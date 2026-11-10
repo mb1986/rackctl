@@ -2,12 +2,55 @@
 
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::catalog::Catalog;
 use crate::kdl_reader::FileError;
 use crate::rack::{Layout, Rack};
 use crate::wiring::{Cabling, Wiring};
+
+/// Folders at the top of a configuration directory that hold models and profiles.
+const DATA_DIRS: &[&str] = &["catalog", "profiles"];
+
+/// Returns the configuration files at `path`, sorted: the file itself, or every `.kdl` file
+/// of the directory and its subdirectories.
+///
+/// Hidden entries, links to directories and the top-level [`DATA_DIRS`] are skipped.
+///
+/// # Errors
+///
+/// Returns the error of a file or directory that cannot be read.
+pub fn find_files(path: &Path) -> io::Result<Vec<PathBuf>> {
+    if !fs::metadata(path)?.is_dir() {
+        return Ok(vec![path.to_owned()]);
+    }
+    let mut files = Vec::new();
+    add_files(path, true, &mut files)?;
+    files.sort();
+    Ok(files)
+}
+
+/// Adds the configuration files in `dir` and its subdirectories. `top` tells whether `dir`
+/// is the configuration directory itself.
+fn add_files(dir: &Path, top: bool, files: &mut Vec<PathBuf>) -> io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') {
+            continue;
+        }
+        if entry.file_type()?.is_dir() {
+            if !(top && DATA_DIRS.contains(&name.as_ref())) {
+                add_files(&path, false, files)?;
+            }
+        } else if path.extension().is_some_and(|extension| extension == "kdl") {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
 
 /// Loads the racks of the configuration file at `path` and checks them against `catalog`.
 ///
@@ -69,6 +112,65 @@ mod tests {
     use crate::testing::dir_with;
 
     const SERVER: &str = r#"model { name "Server"; kind "server" }"#;
+
+    /// Finds the files at `path` and names them relative to `root`.
+    fn found(root: &Path, path: &Path) -> Vec<String> {
+        let files = find_files(path).expect("readable path");
+        let name = |file: &PathBuf| {
+            file.strip_prefix(root).expect("inside the root").display().to_string()
+        };
+        files.iter().map(name).collect()
+    }
+
+    #[test]
+    fn finds_the_kdl_files_of_a_directory_sorted() {
+        let dir = dir_with(&[
+            ("wiring.kdl", ""),
+            ("rack.kdl", ""),
+            ("rack.kdl.draft1", ""),
+            ("notes.md", ""),
+            ("site/b/rack.kdl", ""),
+            ("site/access.kdl", ""),
+        ]);
+        assert_eq!(
+            found(dir.path(), dir.path()),
+            ["rack.kdl", "site/access.kdl", "site/b/rack.kdl", "wiring.kdl"]
+        );
+    }
+
+    #[test]
+    fn finds_a_single_file_whatever_its_name() {
+        let dir = dir_with(&[("all.conf", ""), ("rack.kdl", "")]);
+        assert_eq!(found(dir.path(), &dir.path().join("all.conf")), ["all.conf"]);
+    }
+
+    #[test]
+    fn skips_models_profiles_and_hidden_entries() {
+        let dir = dir_with(&[
+            ("rack.kdl", ""),
+            ("catalog/x/server.kdl", ""),
+            ("profiles/x/server.kdl", ""),
+            ("site/catalog/rack.kdl", ""),
+            (".git/rack.kdl", ""),
+            (".#rack.kdl", ""),
+        ]);
+        assert_eq!(found(dir.path(), dir.path()), ["rack.kdl", "site/catalog/rack.kdl"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn does_not_follow_links_to_directories() {
+        let dir = dir_with(&[("rack.kdl", "")]);
+        std::os::unix::fs::symlink(dir.path(), dir.path().join("loop")).expect("symlink");
+        assert_eq!(found(dir.path(), dir.path()), ["rack.kdl"]);
+    }
+
+    #[test]
+    fn reports_a_path_that_cannot_be_read() {
+        let dir = dir_with(&[]);
+        let error = find_files(&dir.path().join("missing")).expect_err("missing");
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    }
 
     #[test]
     fn loads_a_valid_rack() {
