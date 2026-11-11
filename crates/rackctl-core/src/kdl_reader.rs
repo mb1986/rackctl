@@ -225,15 +225,15 @@ pub fn parse(text: &str) -> Result<KdlDocument, Vec<Problem>> {
             .diagnostics
             .into_iter()
             .map(|diagnostic| {
-                let message = diagnostic.message.unwrap_or_else(|| "invalid KDL".to_owned());
-                let mut problem = Problem::new(message, diagnostic.span);
-                if let Some(label) = diagnostic.label {
-                    problem = problem.with_label(label);
+                let problem = prb::syntax(diagnostic.message, diagnostic.span);
+                let problem = match diagnostic.label {
+                    Some(label) => problem.with_label(label),
+                    None => problem,
+                };
+                match diagnostic.help {
+                    Some(help) => problem.with_help(help),
+                    None => problem,
                 }
-                if let Some(help) = diagnostic.help {
-                    problem = problem.with_help(help);
-                }
-                problem
             })
             .collect()
     })
@@ -257,20 +257,11 @@ pub fn parse_single<T>(
         if node.name().value() == name && found.is_none() {
             found = Some(node);
         } else {
-            problems.push(
-                Problem::new(
-                    format!("unexpected top-level node `{}`", node.name().value()),
-                    node.name().span(),
-                )
-                .with_help(format!("a {name} file contains a single `{name} {{ ... }}` node")),
-            );
+            problems.push(prb::unexpected_top_level(node, name));
         }
     }
     let Some(node) = found else {
-        problems.push(Problem::new(
-            format!("the file does not contain a `{name} {{ ... }}` node"),
-            SourceSpan::from(0..0),
-        ));
+        problems.push(prb::no_top_level(name));
         return Err(problems);
     };
     match read(node, &mut problems) {
@@ -381,11 +372,7 @@ impl<'n, 'p> NodeReader<'n, 'p> {
         if let KdlValue::Bool(value) = entry.value() {
             return Some(*value);
         }
-        let problem = Problem::new(
-            format!("`{key}` must be #true or #false, found {}", describe(entry.value())),
-            entry.span(),
-        );
-        self.problems.push(problem);
+        self.problems.push(prb::not_a_bool(key, entry));
         None
     }
 
@@ -402,28 +389,15 @@ impl<'n, 'p> NodeReader<'n, 'p> {
     /// of child nodes that was not expected.
     pub fn finish(self) {
         if let Some(block) = self.node.children().filter(|_| !self.block_read) {
-            let problem = Problem::new(
-                format!("`{}` does not take a block of child nodes", self.name()),
-                block.span(),
-            )
-            .with_label("not expected");
-            self.problems.push(problem);
+            self.problems.push(prb::unexpected_block(self.node, block.span()));
         }
         for (entry, _) in self.node.entries().iter().zip(&self.used).filter(|(_, used)| !**used) {
             let problem = match entry.name() {
                 Some(name) => {
-                    let name = name.value();
-                    Problem::new(
-                        format!("unknown property `{name}` on `{}`", self.name()),
-                        entry.span(),
-                    )
-                    .with_label("unknown property")
-                    .with_suggestion(name, self.known_properties.iter().map(String::as_str))
+                    let known = self.known_properties.iter().map(String::as_str);
+                    prb::unknown_property(self.node, name.value(), entry, known)
                 }
-                None => {
-                    Problem::new(format!("unexpected argument on `{}`", self.name()), entry.span())
-                        .with_label("not expected")
-                }
+                None => prb::unexpected_argument(self.node, entry),
             };
             self.problems.push(problem);
         }
@@ -441,12 +415,7 @@ impl<'n, 'p> NodeReader<'n, 'p> {
             .nth(index)
             .map(|(position, _)| position);
         let Some(position) = position else {
-            let problem = Problem::new(
-                format!("`{}` is missing its {what}", self.name()),
-                self.node.name().span(),
-            )
-            .with_label(format!("expected {what} after this"));
-            self.problems.push(problem);
+            self.problems.push(prb::missing_argument(self.node, what));
             return None;
         };
         self.used[position] = true;
@@ -467,14 +436,7 @@ impl<'n, 'p> NodeReader<'n, 'p> {
             }
         }
         if let [first, second, rest @ ..] = found.as_slice() {
-            let mut problem =
-                Problem::new(format!("`{key}` is given more than once"), second.span())
-                    .with_label("given again here")
-                    .with_label_at(first.span(), "first given here");
-            for entry in rest {
-                problem = problem.with_label_at(entry.span(), "given again here");
-            }
-            self.problems.push(problem);
+            self.problems.push(prb::repeated_property(key, first, second, rest));
         }
         found.last().copied()
     }
@@ -495,12 +457,7 @@ impl<'n, 'p> NodeReader<'n, 'p> {
     fn required(&mut self, key: &str) -> Option<&'n KdlEntry> {
         let entry = self.property(key);
         if entry.is_none() && !self.has_misspelling_of(key) {
-            let problem = Problem::new(
-                format!("`{}` is missing the property `{key}`", self.name()),
-                self.node.name().span(),
-            )
-            .with_label(format!("add {key}=..."));
-            self.problems.push(problem);
+            self.problems.push(prb::missing_property(self.node, key));
         }
         entry
     }
@@ -509,11 +466,7 @@ impl<'n, 'p> NodeReader<'n, 'p> {
         if let KdlValue::String(value) = entry.value() {
             return Some(value.clone());
         }
-        let problem = Problem::new(
-            format!("`{what}` must be a string, found {}", describe(entry.value())),
-            entry.span(),
-        );
-        self.problems.push(problem);
+        self.problems.push(prb::not_a_string(what, entry));
         None
     }
 
@@ -522,13 +475,7 @@ impl<'n, 'p> NodeReader<'n, 'p> {
         if let Ok(parsed) = value.parse() {
             return Some(parsed);
         }
-        let choices = format!("`{}`", T::VARIANTS.join("`, `"));
-        let problem = Problem::new(
-            format!("`{what}` must be one of {choices}, found `{value}`"),
-            entry.span(),
-        )
-        .with_suggestion(&value, T::VARIANTS.iter().copied());
-        self.problems.push(problem);
+        self.problems.push(prb::not_a_choice(what, &value, T::VARIANTS, entry));
         None
     }
 
@@ -536,26 +483,12 @@ impl<'n, 'p> NodeReader<'n, 'p> {
         let problem = match entry.value() {
             KdlValue::Integer(value) => match T::try_from(*value) {
                 Ok(value) => return Some(value),
-                Err(_) => Problem::new(format!("`{what}` is out of range: {value}"), entry.span()),
+                Err(_) => prb::out_of_range(what, *value, entry),
             },
-            other => Problem::new(
-                format!("`{what}` must be a whole number, found {}", describe(other)),
-                entry.span(),
-            ),
+            _ => prb::not_a_whole_number(what, entry),
         };
         self.problems.push(problem);
         None
-    }
-}
-
-/// Describes a value for use in messages, for example `the string "30"`.
-fn describe(value: &KdlValue) -> String {
-    match value {
-        KdlValue::String(text) => format!("the string \"{text}\""),
-        KdlValue::Integer(number) => format!("the number {number}"),
-        KdlValue::Float(number) => format!("the number {number:?}"),
-        KdlValue::Bool(flag) => format!("#{flag}"),
-        KdlValue::Null => "#null".to_owned(),
     }
 }
 
@@ -575,6 +508,130 @@ fn closest<'c>(word: &str, candidates: impl IntoIterator<Item = &'c str>) -> Opt
         .filter(|&(distance, candidate)| distance <= 2 && distance < candidate.len())
         .min_by_key(|&(distance, _)| distance)
         .map(|(_, candidate)| candidate)
+}
+
+/// The problems reported while reading KDL.
+mod prb {
+    use kdl::{KdlEntry, KdlNode, KdlValue};
+    use miette::SourceSpan;
+
+    use super::Problem;
+
+    /// `message` is the parser's own, when it gives one.
+    pub(super) fn syntax(message: Option<String>, span: SourceSpan) -> Problem {
+        Problem::new(message.unwrap_or_else(|| "invalid KDL".to_owned()), span)
+    }
+
+    /// The file holds a single node called `name`.
+    pub(super) fn unexpected_top_level(node: &KdlNode, name: &str) -> Problem {
+        let found = node.name().value();
+        Problem::new(format!("unexpected top-level node `{found}`"), node.name().span())
+            .with_help(format!("a {name} file contains a single `{name} {{ ... }}` node"))
+    }
+
+    pub(super) fn no_top_level(name: &str) -> Problem {
+        let message = format!("the file does not contain a `{name} {{ ... }}` node");
+        Problem::new(message, SourceSpan::from(0..0))
+    }
+
+    /// `what` names the missing argument, such as `name`.
+    pub(super) fn missing_argument(node: &KdlNode, what: &str) -> Problem {
+        let name = node.name().value();
+        Problem::new(format!("`{name}` is missing its {what}"), node.name().span())
+            .with_label(format!("expected {what} after this"))
+    }
+
+    pub(super) fn missing_property(node: &KdlNode, key: &str) -> Problem {
+        let name = node.name().value();
+        Problem::new(format!("`{name}` is missing the property `{key}`"), node.name().span())
+            .with_label(format!("add {key}=..."))
+    }
+
+    pub(super) fn unexpected_argument(node: &KdlNode, entry: &KdlEntry) -> Problem {
+        let name = node.name().value();
+        Problem::new(format!("unexpected argument on `{name}`"), entry.span())
+            .with_label("not expected")
+    }
+
+    /// `known` are the properties the node takes, to suggest from.
+    pub(super) fn unknown_property<'c>(
+        node: &KdlNode,
+        property: &str,
+        entry: &KdlEntry,
+        known: impl IntoIterator<Item = &'c str>,
+    ) -> Problem {
+        let name = node.name().value();
+        Problem::new(format!("unknown property `{property}` on `{name}`"), entry.span())
+            .with_label("unknown property")
+            .with_suggestion(property, known)
+    }
+
+    /// `span` is the place of the block.
+    pub(super) fn unexpected_block(node: &KdlNode, span: SourceSpan) -> Problem {
+        let name = node.name().value();
+        Problem::new(format!("`{name}` does not take a block of child nodes"), span)
+            .with_label("not expected")
+    }
+
+    /// The property `key` is given at `first`, at `second` and at each of `rest`.
+    pub(super) fn repeated_property(
+        key: &str,
+        first: &KdlEntry,
+        second: &KdlEntry,
+        rest: &[&KdlEntry],
+    ) -> Problem {
+        let problem = Problem::new(format!("`{key}` is given more than once"), second.span())
+            .with_label("given again here")
+            .with_label_at(first.span(), "first given here");
+        rest.iter()
+            .fold(problem, |problem, entry| problem.with_label_at(entry.span(), "given again here"))
+    }
+
+    /// `what` names the value, such as `model`.
+    pub(super) fn not_a_string(what: &str, entry: &KdlEntry) -> Problem {
+        let found = describe(entry.value());
+        Problem::new(format!("`{what}` must be a string, found {found}"), entry.span())
+    }
+
+    /// `what` names the value, such as `compact`.
+    pub(super) fn not_a_bool(what: &str, entry: &KdlEntry) -> Problem {
+        let found = describe(entry.value());
+        Problem::new(format!("`{what}` must be #true or #false, found {found}"), entry.span())
+    }
+
+    /// `what` names the value, such as `u`.
+    pub(super) fn not_a_whole_number(what: &str, entry: &KdlEntry) -> Problem {
+        let found = describe(entry.value());
+        Problem::new(format!("`{what}` must be a whole number, found {found}"), entry.span())
+    }
+
+    /// `what` names the value, such as `units`.
+    pub(super) fn out_of_range(what: &str, value: i128, entry: &KdlEntry) -> Problem {
+        Problem::new(format!("`{what}` is out of range: {value}"), entry.span())
+    }
+
+    /// `what` names the value, such as `face`, and `choices` are the words it accepts.
+    pub(super) fn not_a_choice(
+        what: &str,
+        value: &str,
+        choices: &'static [&'static str],
+        entry: &KdlEntry,
+    ) -> Problem {
+        let listed = format!("`{}`", choices.join("`, `"));
+        Problem::new(format!("`{what}` must be one of {listed}, found `{value}`"), entry.span())
+            .with_suggestion(value, choices.iter().copied())
+    }
+
+    /// Describes a value, for example `the string "30"`.
+    fn describe(value: &KdlValue) -> String {
+        match value {
+            KdlValue::String(text) => format!("the string \"{text}\""),
+            KdlValue::Integer(number) => format!("the number {number}"),
+            KdlValue::Float(number) => format!("the number {number:?}"),
+            KdlValue::Bool(flag) => format!("#{flag}"),
+            KdlValue::Null => "#null".to_owned(),
+        }
+    }
 }
 
 #[cfg(test)]
