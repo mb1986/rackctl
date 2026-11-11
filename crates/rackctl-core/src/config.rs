@@ -7,10 +7,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use kdl::KdlNode;
-use miette::SourceSpan;
 
 use crate::catalog::Catalog;
-use crate::kdl_reader::{self, FileError, FileId, Problem, span_of};
+use crate::kdl_reader::{self, FileError, FileId, Place, Problem, span_of};
 use crate::rack::{self, Layout, Rack};
 use crate::wiring::{self, Cabling, Wiring};
 
@@ -30,13 +29,6 @@ struct File {
     name: String,
     text: String,
     problems: Vec<Problem>,
-}
-
-/// A place in one of the files.
-#[derive(Clone, Copy)]
-struct Place {
-    file: FileId,
-    span: SourceSpan,
 }
 
 /// What the files hold, gathered while they are read.
@@ -68,8 +60,7 @@ pub fn load(path: &Path, catalog: &Catalog) -> Result<Config, Vec<FileError>> {
     let mut files = Vec::with_capacity(paths.len());
     let mut found = Found::default();
     for path in &paths {
-        let file = read_file(path, &files, &mut found);
-        files.push(file);
+        files.push(read_file(path, FileId(files.len()), &mut found));
     }
     if has_problems(&files) {
         return Err(errors(files));
@@ -100,10 +91,8 @@ pub fn load(path: &Path, catalog: &Catalog) -> Result<Config, Vec<FileError>> {
     Ok(Config { files: paths, layout, cabling })
 }
 
-/// Reads the file at `path` and gathers what it holds into `found`. `earlier` are the files
-/// read before it.
-fn read_file(path: &Path, earlier: &[File], found: &mut Found) -> File {
-    let id = FileId(earlier.len());
+/// Reads the file at `path`, the file `id`, and gathers what it holds into `found`.
+fn read_file(path: &Path, id: FileId, found: &mut Found) -> File {
     let mut file =
         File { name: path.display().to_string(), text: String::new(), problems: Vec::new() };
     match fs::read_to_string(path) {
@@ -123,12 +112,12 @@ fn read_file(path: &Path, earlier: &[File], found: &mut Found) -> File {
     for node in document.nodes() {
         match node.name().value() {
             "rack" => {
-                file.problems.extend(repeated_rack(node, id, earlier, found));
+                file.problems.extend(repeated_rack(node, id, found));
                 found.racks.extend(rack::read_rack(node, id, &mut file.problems));
             }
             "wiring" => {
-                if let Some((_, place)) = &found.wiring {
-                    file.problems.push(prb::second_wiring(node, &first(*place, id, earlier)));
+                if let Some((_, first)) = &found.wiring {
+                    file.problems.push(prb::second_wiring(node, *first));
                 } else {
                     let wiring = wiring::read_wiring(node, id, &mut file.problems);
                     found.wiring = Some((wiring, Place { file: id, span: node.name().span() }));
@@ -142,18 +131,11 @@ fn read_file(path: &Path, earlier: &[File], found: &mut Found) -> File {
 
 /// Reports the name of the `rack` node when a rack before it has the same one. The node is
 /// in the file `id`, read after `earlier`.
-fn repeated_rack(
-    node: &KdlNode,
-    id: FileId,
-    earlier: &[File],
-    found: &mut Found,
-) -> Option<Problem> {
+fn repeated_rack(node: &KdlNode, id: FileId, found: &mut Found) -> Option<Problem> {
     let name = node.entry(0)?.value().as_string()?;
     let place = Place { file: id, span: span_of(node, 0) };
     match found.rack_names.entry(name.to_owned()) {
-        Entry::Occupied(used) => {
-            Some(prb::repeated_rack(name, place.span, &first(*used.get(), id, earlier)))
-        }
+        Entry::Occupied(first) => Some(prb::repeated_rack(name, place.span, *first.get())),
         Entry::Vacant(slot) => {
             slot.insert(place);
             None
@@ -161,15 +143,11 @@ fn repeated_rack(
     }
 }
 
-/// Describes `place`, where something was first written, for a problem in the file `id`,
-/// read after `earlier`.
-fn first(place: Place, id: FileId, earlier: &[File]) -> prb::First<'_> {
-    if place.file == id {
-        return prb::First::Here(place.span);
-    }
-    let file = &earlier[place.file.0];
+/// Describes a place for a problem in another file, such as `rack.kdl, line 12`.
+fn describe(files: &[File], place: Place) -> String {
+    let file = &files[place.file.0];
     let line = file.text[..place.span.offset()].matches('\n').count() + 1;
-    prb::First::In { file: &file.name, line }
+    format!("{}, line {line}", file.name)
 }
 
 fn has_problems(files: &[File]) -> bool {
@@ -177,7 +155,15 @@ fn has_problems(files: &[File]) -> bool {
 }
 
 /// Returns the problems of each file that has some.
-fn errors(files: Vec<File>) -> Vec<FileError> {
+fn errors(mut files: Vec<File>) -> Vec<FileError> {
+    // A problem may involve a place in another file, so they are settled before the files
+    // are taken apart.
+    for index in 0..files.len() {
+        let problems = std::mem::take(&mut files[index].problems);
+        let settle =
+            |problem: Problem| problem.settle(FileId(index), |place| describe(&files, place));
+        files[index].problems = problems.into_iter().map(settle).collect();
+    }
     files
         .into_iter()
         .filter(|file| !file.problems.is_empty())
@@ -233,30 +219,10 @@ mod prb {
     use kdl::KdlNode;
     use miette::SourceSpan;
 
-    use crate::kdl_reader::Problem;
+    use crate::kdl_reader::{Place, Problem};
 
     /// The top-level nodes of a configuration.
     const NODES: &[&str] = &["rack", "wiring"];
-
-    /// Where something was first written.
-    pub(super) enum First<'a> {
-        /// In the same file as the problem.
-        Here(SourceSpan),
-        /// In another file.
-        In { file: &'a str, line: usize },
-    }
-
-    impl First<'_> {
-        /// Adds the place to `problem`. `what` says what happened there, such as `first used`.
-        fn note(&self, problem: Problem, what: &str) -> Problem {
-            match self {
-                Self::Here(span) => problem.with_label_at(*span, format!("{what} here")),
-                Self::In { file, line } => {
-                    problem.with_help(format!("{what} in {file}, line {line}"))
-                }
-            }
-        }
-    }
 
     pub(super) fn no_files() -> Problem {
         Problem::new("there are no `.kdl` files in the directory", SourceSpan::from(0..0))
@@ -273,17 +239,16 @@ mod prb {
             .with_suggestion(key, NODES.iter().copied())
     }
 
-    pub(super) fn repeated_rack(name: &str, span: SourceSpan, first: &First) -> Problem {
-        let problem = Problem::new(format!("the rack name `{name}` is used more than once"), span)
-            .with_label("used again here");
-        first.note(problem, "first used")
+    pub(super) fn repeated_rack(name: &str, span: SourceSpan, first: Place) -> Problem {
+        Problem::new(format!("the rack name `{name}` is used more than once"), span)
+            .with_label("used again here")
+            .with_place(first, "first used")
     }
 
-    pub(super) fn second_wiring(node: &KdlNode, first: &First) -> Problem {
-        let span = node.name().span();
-        let problem = Problem::new("the configuration has more than one `wiring` node", span)
-            .with_label("given again here");
-        first.note(problem, "first given")
+    pub(super) fn second_wiring(node: &KdlNode, first: Place) -> Problem {
+        Problem::new("the configuration has more than one `wiring` node", node.name().span())
+            .with_label("given again here")
+            .with_place(first, "first given")
     }
 }
 

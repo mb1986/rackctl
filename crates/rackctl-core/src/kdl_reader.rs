@@ -32,6 +32,15 @@ pub struct Problem {
     other_labels: Vec<LabeledSpan>,
     #[help]
     help: Option<String>,
+    /// Another place the problem involves, and what happened there, until [`Self::settle`].
+    elsewhere: Option<Box<(Place, String)>>,
+}
+
+/// A place in one of the files of a configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Place {
+    pub file: FileId,
+    pub span: SourceSpan,
 }
 
 impl Problem {
@@ -43,6 +52,29 @@ impl Problem {
             label: "here".to_owned(),
             other_labels: Vec::new(),
             help: None,
+            elsewhere: None,
+        }
+    }
+
+    /// Notes another place the problem involves, which may be in another file. `what` says
+    /// what happened there, such as `first used`.
+    #[must_use]
+    pub fn with_place(mut self, place: Place, what: impl Into<String>) -> Self {
+        self.elsewhere = Some(Box::new((place, what.into())));
+        self
+    }
+
+    /// Shows the place noted with [`Self::with_place`] in a problem of the file `file`: as a
+    /// label when the place is in that file, otherwise as a help with what `describe` gives
+    /// for the place, such as `rack.kdl, line 12`.
+    #[must_use]
+    pub fn settle(mut self, file: FileId, describe: impl FnOnce(Place) -> String) -> Self {
+        let Some(elsewhere) = self.elsewhere.take() else { return self };
+        let (place, what) = *elsewhere;
+        if place.file == file {
+            self.with_label_at(place.span, format!("{what} here"))
+        } else {
+            self.with_help(format!("{what} in {}", describe(place)))
         }
     }
 
