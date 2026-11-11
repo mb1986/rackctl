@@ -81,10 +81,7 @@ pub(crate) fn read_wiring(node: &KdlNode, file: FileId, problems: &mut Vec<Probl
 fn read_path(node: &KdlNode, problems: &mut Vec<Problem>) -> Option<CablePath> {
     let name = node.name().value();
     let Ok(kind) = name.parse::<LinkKind>() else {
-        problems.push(
-            Problem::new(format!("unknown link type `{name}`"), node.name().span())
-                .with_suggestion(name, LinkKind::VARIANTS.iter().copied()),
-        );
+        problems.push(prb::unknown_link_type(node));
         return None;
     };
     let count = node.entries().iter().filter(|entry| entry.name().is_none()).count();
@@ -100,7 +97,7 @@ fn read_path(node: &KdlNode, problems: &mut Vec<Problem>) -> Option<CablePath> {
             Some(Ok((device, name))) => {
                 endpoints.push(EndpointRef { device: device.to_owned(), name, span });
             }
-            Some(Err(message)) => problems.push(Problem::new(message, span)),
+            Some(Err(message)) => problems.push(prb::not_an_endpoint(message, span)),
             None => {}
         }
     }
@@ -119,32 +116,58 @@ fn check_path(
     endpoints: &[EndpointRef],
     problems: &mut Vec<Problem>,
 ) {
-    let name: &str = kind.into();
     if endpoints.len() < 2 {
-        problems.push(
-            Problem::new(
-                format!("a `{name}` link needs at least two endpoints"),
-                node.name().span(),
-            )
-            .with_label("a cable has two ends"),
-        );
+        problems.push(prb::too_few_endpoints(kind, node));
         return;
     }
     if kind == LinkKind::Power
         && let Some(extra) = endpoints.get(2)
     {
-        problems.push(
-            Problem::new("a `power` link connects exactly two endpoints", extra.span)
-                .with_help("write each power cable on its own line, from the outlet to the PSU"),
-        );
+        problems.push(prb::power_through(extra));
     }
     for end in [&endpoints[0], &endpoints[endpoints.len() - 1]] {
         if let EndpointName::Through { number, .. } = end.name {
-            problems.push(
-                Problem::new("a path cannot pass through its first or last endpoint", end.span)
-                    .with_help(format!("name the one side cabled here, such as `b{number}`")),
-            );
+            problems.push(prb::through_at_an_end(end, number));
         }
+    }
+}
+
+/// The problems reported for a wiring as written.
+mod prb {
+    use kdl::KdlNode;
+    use miette::SourceSpan;
+    use strum::VariantNames;
+
+    use super::{EndpointRef, LinkKind};
+    use crate::kdl_reader::Problem;
+
+    pub(super) fn unknown_link_type(node: &KdlNode) -> Problem {
+        let name = node.name().value();
+        Problem::new(format!("unknown link type `{name}`"), node.name().span())
+            .with_suggestion(name, LinkKind::VARIANTS.iter().copied())
+    }
+
+    /// `message` says why the text at `span` is not an endpoint.
+    pub(super) fn not_an_endpoint(message: String, span: SourceSpan) -> Problem {
+        Problem::new(message, span)
+    }
+
+    pub(super) fn too_few_endpoints(kind: LinkKind, node: &KdlNode) -> Problem {
+        let name: &str = kind.into();
+        Problem::new(format!("a `{name}` link needs at least two endpoints"), node.name().span())
+            .with_label("a cable has two ends")
+    }
+
+    /// `extra` is the third endpoint of a power link.
+    pub(super) fn power_through(extra: &EndpointRef) -> Problem {
+        Problem::new("a `power` link connects exactly two endpoints", extra.span)
+            .with_help("write each power cable on its own line, from the outlet to the PSU")
+    }
+
+    /// `end` is the patch port, number `number`, written with both sides.
+    pub(super) fn through_at_an_end(end: &EndpointRef, number: u16) -> Problem {
+        Problem::new("a path cannot pass through its first or last endpoint", end.span)
+            .with_help(format!("name the one side cabled here, such as `b{number}`"))
     }
 }
 
