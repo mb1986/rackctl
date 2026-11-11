@@ -13,7 +13,6 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use miette::SourceSpan;
 use thiserror::Error;
 
 pub use face::{Cell, Element, Face, FaceKind, Faces, STRIP_WIDTH};
@@ -24,8 +23,8 @@ pub use model::{Components, Depth, Ears, Kind, Model, Mount};
 pub(crate) use numbering::names as part_names;
 pub use numbering::{NumberRun, Numbers, Slot};
 
-use crate::kdl_reader::{FileError, Problem};
-use crate::{IDENTIFIER_RULE, is_identifier};
+use crate::is_identifier;
+use crate::kdl_reader::FileError;
 
 /// The device catalog: every hardware model available to the racks.
 ///
@@ -245,10 +244,7 @@ fn is_valid_id(id: &str) -> bool {
 }
 
 fn invalid_name(name: String) -> FileError {
-    let problem =
-        Problem::new(format!("model file names {IDENTIFIER_RULE}"), SourceSpan::from(0..0))
-            .with_help("rename the file, for example `dell/r630-sff8.kdl`");
-    FileError::new(name, "", vec![problem])
+    FileError::new(name, "", vec![prb::invalid_file_name()])
 }
 
 /// Reads and parses one model file.
@@ -263,9 +259,23 @@ fn load(id: &str, source: &Source) -> Result<Model, FileError> {
     Model::parse(id, &text).map_err(|problems| FileError::new(name, text, problems))
 }
 
+/// The problems reported for the catalog's files.
+mod prb {
+    use miette::SourceSpan;
+
+    use crate::IDENTIFIER_RULE;
+    use crate::kdl_reader::Problem;
+
+    pub(super) fn invalid_file_name() -> Problem {
+        Problem::new(format!("model file names {IDENTIFIER_RULE}"), SourceSpan::from(0..0))
+            .with_help("rename the file, for example `dell/r630-sff8.kdl`")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::IDENTIFIER_RULE;
     use crate::testing::dir_with;
 
     const R630: &str = r#"model { name "Dell PowerEdge R630"; short "R630"; kind "server" }"#;
