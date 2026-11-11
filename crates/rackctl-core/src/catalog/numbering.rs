@@ -240,19 +240,8 @@ fn check_faces_agree(faces: &Faces, numbered: &NumberedPart<'_>, problems: &mut 
         let found: Vec<String> =
             groups.map(|(group, &size)| group.describe(numbered.part, Some(size))).collect();
         let expected: Vec<String> = expected.iter().map(ToString::to_string).collect();
-        problems.push(
-            Problem::new(
-                format!(
-                    "the {} face shows {}, but the {} face shows {}",
-                    face.kind.name(),
-                    found.join(" and "),
-                    first.kind.name(),
-                    expected.join(" and ")
-                ),
-                face.span,
-            )
-            .with_label_at(first.span, format!("the {} face", first.kind.name())),
-        );
+        let (found, expected) = (found.join(" and "), expected.join(" and "));
+        problems.push(prb::faces_disagree(face, &found, first, &expected));
     }
 }
 
@@ -295,20 +284,8 @@ fn numbered_parts<'l>(legend: &'l Legend, problems: &mut Vec<Problem>) -> Vec<Nu
 fn check_entry(part: Part, group: &Group<'_>, entry: &LegendEntry, problems: &mut Vec<Problem>) {
     let Some(numbers) = &entry.numbering.numbers else {
         if let Some(other) = group.free() {
-            problems.push(
-                Problem::new(
-                    format!(
-                        "`{}` and `{}` both number the {} from `first`",
-                        other.key,
-                        entry.key,
-                        group.describe(part, None)
-                    ),
-                    entry.span,
-                )
-                .with_help(
-                    "give all but one of them `numbers=`; the one without takes the numbers left",
-                ),
-            );
+            let elements = group.describe(part, None);
+            problems.push(prb::two_entries_number_from_first(other.key, entry, &elements));
         }
         return;
     };
@@ -326,23 +303,13 @@ fn check_entry(part: Part, group: &Group<'_>, entry: &LegendEntry, problems: &mu
             continue;
         }
         shared.sort_unstable();
-        let mut problem = Problem::new(
-            format!(
-                "`{}` and `{}` give the same numbers to the {}: {}",
-                other.key,
-                entry.key,
-                group.describe(part, None),
-                describe_runs(
-                    shared.chunk_by(|a, b| b - a == 1).map(|run| (run[0], run[run.len() - 1]))
-                )
-            ),
-            numbers.span,
-        );
-        if part.has_media() {
-            problem = problem
-                .with_help("only an RJ45 and an SFP element may share a number, as one combo port");
-        }
-        problems.push(problem);
+        let runs = shared.chunk_by(|a, b| b - a == 1).map(|run| (run[0], run[run.len() - 1]));
+        let shared = prb::Shared {
+            keys: (other.key, entry.key),
+            elements: &group.describe(part, None),
+            numbers: &describe_runs(runs),
+        };
+        problems.push(prb::same_numbers(&shared, numbers.span, part.has_media()));
     }
 }
 
@@ -371,13 +338,7 @@ fn number_part<'l>(
     if !missing.is_empty() {
         let (name, _) = names(numbered.part);
         let keys: Vec<String> = missing.iter().map(|key| format!("`{key}`")).collect();
-        problems.push(
-            Problem::new(
-                format!("the {} face shows {name}s, but not {}", face.kind.name(), keys.join(", ")),
-                face.span,
-            )
-            .with_help(format!("a face shows every legend key of its {name}s, or none of them")),
-        );
+        problems.push(prb::keys_not_shown(face, name, &keys.join(", ")));
     }
     for shown in &shown {
         give_numbers(face, &numbered.groups[shown.group], shown, problems);
@@ -410,20 +371,7 @@ fn check_numbers(
     let total: usize = sorted.iter().map(|numbers| slots(numbers)).sum();
     let declared = components.count(numbered.part);
     if total != usize::from(declared) {
-        let (name, node) = names(numbered.part);
-        let count = if declared == 0 { "none".to_owned() } else { declared.to_string() };
-        let mut problem = Problem::new(
-            format!(
-                "the {} face shows {}, but the model declares {count}",
-                face.kind.name(),
-                plural(total, name)
-            ),
-            face.span,
-        );
-        if declared == 0 {
-            problem = problem.with_help(format!("add `{node} {total}` to the model"));
-        }
-        problems.push(problem);
+        problems.push(prb::count_not_declared(face, numbered.part, total, declared));
         return;
     }
     let mut complete = true;
@@ -470,14 +418,13 @@ fn give_numbers(
             face.set_number(index, number);
         }
         if numbers.value.len() != elements.len() {
-            problems.push(Problem::new(
-                format!(
-                    "`numbers` lists {}, but the {} face has {}",
-                    plural(numbers.value.len(), "number"),
-                    face.kind.name(),
-                    plural(elements.len(), &format!("`{}` element", entry.key)),
-                ),
+            let listed = numbers.value.len();
+            problems.push(prb::numbers_count(
                 numbers.span,
+                listed,
+                face,
+                entry.key,
+                elements.len(),
             ));
         }
         return;
@@ -490,10 +437,7 @@ fn give_numbers(
         given += 1;
     }
     if given < elements.len() {
-        problems.push(Problem::new(
-            format!("`{}` runs out of numbers after {}", entry.key, u16::MAX),
-            entry.span,
-        ));
+        problems.push(prb::out_of_numbers(entry));
     }
 }
 
@@ -519,19 +463,8 @@ fn report_gaps(
         }
     }
     let Some((cause, others)) = causes.split_first() else { return false };
-    let mut problem = Problem::new(
-        format!(
-            "the numbers of the {} on the {} face skip {}",
-            group.describe(part, None),
-            face.kind.name(),
-            describe_runs(skipped)
-        ),
-        *cause,
-    );
-    for &other in others {
-        problem = problem.with_label_at(other, "this leaves a gap too");
-    }
-    problems.push(problem);
+    let (elements, skipped) = (group.describe(part, None), describe_runs(skipped));
+    problems.push(prb::numbers_skipped(&elements, face, &skipped, *cause, others));
     true
 }
 
@@ -608,17 +541,10 @@ fn layout_grid(
     if picture.is_empty() {
         return None;
     }
-    let face_name = face.kind.name();
     let rows: Vec<&[Position]> = picture.chunk_by(|a, b| a.row == b.row).collect();
     if rows.len() != layout.value.len() {
-        problems.push(Problem::new(
-            format!(
-                "`layout` has {}, but the {face_name} face has `{key}` elements on {}",
-                plural(layout.value.len(), "row"),
-                plural(rows.len(), "row"),
-            ),
-            layout.span,
-        ));
+        let written = layout.value.len();
+        problems.push(prb::layout_rows(layout.span, written, face, key, rows.len()));
         return None;
     }
     let mut placed = Vec::with_capacity(picture.len());
@@ -626,15 +552,8 @@ fn layout_grid(
         let columns: Vec<usize> =
             slots.iter().enumerate().filter(|(_, slot)| **slot).map(|(column, _)| column).collect();
         if columns.len() != elements.len() {
-            problems.push(Problem::new(
-                format!(
-                    "row {} of `layout` has {} `x`, but the {face_name} face has {} there",
-                    row + 1,
-                    columns.len(),
-                    plural(elements.len(), &format!("`{key}` element")),
-                ),
-                layout.span,
-            ));
+            let row = prb::LayoutRow { number: row + 1, slots: columns.len() };
+            problems.push(prb::layout_row(layout.span, &row, face, key, elements.len()));
             return None;
         }
         placed.extend(elements.iter().zip(columns).map(|(element, column)| Position {
@@ -644,6 +563,171 @@ fn layout_grid(
         }));
     }
     Some(placed)
+}
+
+/// The problems reported for the numbering of a face.
+mod prb {
+    use miette::SourceSpan;
+
+    use super::{Face, LegendEntry, Part, names};
+    use crate::kdl_reader::Problem;
+    use crate::plural;
+
+    /// Two legend keys that list the same numbers for the same elements.
+    pub(super) struct Shared<'a> {
+        pub keys: (char, char),
+        /// The elements numbered, such as `ports` or `XG ports`.
+        pub elements: &'a str,
+        /// The numbers both keys list, such as `1-4, 7`.
+        pub numbers: &'a str,
+    }
+
+    /// A row of a `layout`: its number from 1, and how many `x` it has.
+    pub(super) struct LayoutRow {
+        pub number: usize,
+        pub slots: usize,
+    }
+
+    /// `found` and `expected` describe what `face` and the `first` face show.
+    pub(super) fn faces_disagree(
+        face: &Face,
+        found: &str,
+        first: &Face,
+        expected: &str,
+    ) -> Problem {
+        let (name, first_name) = (face.kind.name(), first.kind.name());
+        let message =
+            format!("the {name} face shows {found}, but the {first_name} face shows {expected}");
+        Problem::new(message, face.span).with_label_at(first.span, format!("the {first_name} face"))
+    }
+
+    /// `other` and `entry` are the keys without `numbers=`, and `elements` what they number.
+    pub(super) fn two_entries_number_from_first(
+        other: char,
+        entry: &LegendEntry,
+        elements: &str,
+    ) -> Problem {
+        let key = entry.key;
+        Problem::new(
+            format!("`{other}` and `{key}` both number the {elements} from `first`"),
+            entry.span,
+        )
+        .with_help("give all but one of them `numbers=`; the one without takes the numbers left")
+    }
+
+    /// `span` is the place of the second list. `media` tells whether the part has media, so
+    /// that two of its elements can be one combo port.
+    pub(super) fn same_numbers(shared: &Shared, span: SourceSpan, media: bool) -> Problem {
+        let Shared { keys: (other, key), elements, numbers } = shared;
+        let problem = Problem::new(
+            format!("`{other}` and `{key}` give the same numbers to the {elements}: {numbers}"),
+            span,
+        );
+        if media {
+            problem
+                .with_help("only an RJ45 and an SFP element may share a number, as one combo port")
+        } else {
+            problem
+        }
+    }
+
+    /// `name` names the part, and `keys` lists the legend keys the face does not show.
+    pub(super) fn keys_not_shown(face: &Face, name: &str, keys: &str) -> Problem {
+        Problem::new(
+            format!("the {} face shows {name}s, but not {keys}", face.kind.name()),
+            face.span,
+        )
+        .with_help(format!("a face shows every legend key of its {name}s, or none of them"))
+    }
+
+    /// The face shows `total` elements of `part`, and the model declares `declared`.
+    pub(super) fn count_not_declared(
+        face: &Face,
+        part: Part,
+        total: usize,
+        declared: u16,
+    ) -> Problem {
+        let (name, node) = names(part);
+        let count = if declared == 0 { "none".to_owned() } else { declared.to_string() };
+        let shown = plural(total, name);
+        let problem = Problem::new(
+            format!("the {} face shows {shown}, but the model declares {count}", face.kind.name()),
+            face.span,
+        );
+        if declared == 0 {
+            problem.with_help(format!("add `{node} {total}` to the model"))
+        } else {
+            problem
+        }
+    }
+
+    /// `numbers=` at `span` lists `listed` numbers for the `elements` elements of `key`.
+    pub(super) fn numbers_count(
+        span: SourceSpan,
+        listed: usize,
+        face: &Face,
+        key: char,
+        elements: usize,
+    ) -> Problem {
+        let listed = plural(listed, "number");
+        let elements = plural(elements, &format!("`{key}` element"));
+        let name = face.kind.name();
+        Problem::new(format!("`numbers` lists {listed}, but the {name} face has {elements}"), span)
+    }
+
+    pub(super) fn out_of_numbers(entry: &LegendEntry) -> Problem {
+        Problem::new(format!("`{}` runs out of numbers after {}", entry.key, u16::MAX), entry.span)
+    }
+
+    /// `elements` names what is numbered and `skipped` the numbers left out. `cause` is what
+    /// gives the number after the first gap, and `others` what gives it after the others.
+    pub(super) fn numbers_skipped(
+        elements: &str,
+        face: &Face,
+        skipped: &str,
+        cause: SourceSpan,
+        others: &[SourceSpan],
+    ) -> Problem {
+        let name = face.kind.name();
+        let message = format!("the numbers of the {elements} on the {name} face skip {skipped}");
+        others.iter().fold(Problem::new(message, cause), |problem, &other| {
+            problem.with_label_at(other, "this leaves a gap too")
+        })
+    }
+
+    /// `layout` at `span` has `written` rows, and the face has elements of `key` on `rows`.
+    pub(super) fn layout_rows(
+        span: SourceSpan,
+        written: usize,
+        face: &Face,
+        key: char,
+        rows: usize,
+    ) -> Problem {
+        let (written, rows, name) = (plural(written, "row"), plural(rows, "row"), face.kind.name());
+        Problem::new(
+            format!("`layout` has {written}, but the {name} face has `{key}` elements on {rows}"),
+            span,
+        )
+    }
+
+    /// The face has `elements` elements of `key` on the picture row that `row` describes.
+    pub(super) fn layout_row(
+        span: SourceSpan,
+        row: &LayoutRow,
+        face: &Face,
+        key: char,
+        elements: usize,
+    ) -> Problem {
+        let LayoutRow { number, slots } = row;
+        let elements = plural(elements, &format!("`{key}` element"));
+        let name = face.kind.name();
+        Problem::new(
+            format!(
+                "row {number} of `layout` has {slots} `x`, but the {name} face has {elements} there"
+            ),
+            span,
+        )
+    }
 }
 
 #[cfg(test)]
