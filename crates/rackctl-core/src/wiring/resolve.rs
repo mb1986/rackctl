@@ -134,14 +134,7 @@ impl Wiring {
             }
             for (pair, written) in found.windows(2).zip(path.endpoints.windows(2)) {
                 if pair[0].socket == pair[1].socket {
-                    let (noun, _) = part_names(pair[1].part);
-                    let message =
-                        format!("a cable cannot connect {} to itself", with_article(noun));
-                    problems.push(
-                        Problem::new(message, written[1].span)
-                            .with_label("the same")
-                            .with_label_at(written[0].span, "as this"),
-                    );
+                    problems.push(prb::connected_to_itself(pair[1].part, &written[1], &written[0]));
                     continue;
                 }
                 let ends = [
@@ -153,7 +146,7 @@ impl Wiring {
                     let first_use = &mut first_uses[end.place()];
                     match *first_use {
                         Some(first) => {
-                            problems.push(already_connected(end, written, first));
+                            problems.push(prb::already_connected(end, written, first));
                             free = false;
                         }
                         None => *first_use = Some(Place { file: self.file, span: written.span }),
@@ -181,7 +174,8 @@ impl Cabling {
         catalog: &Catalog,
     ) -> Result<SocketId, Problem> {
         let span = SourceSpan::from(0..text.len());
-        let (device, name) = parse_endpoint(text).map_err(|message| Problem::new(message, span))?;
+        let (device, name) =
+            parse_endpoint(text).map_err(|message| prb::not_an_endpoint(message, span))?;
         let end = EndpointRef { device: device.to_owned(), name, span };
         Ok(Devices::new(layout, catalog).find(&end, Position::Alone, self, None)?.socket)
     }
@@ -197,30 +191,16 @@ impl Devices<'_> {
         cabling: &Cabling,
         rack: Option<&str>,
     ) -> Result<Found, Problem> {
-        // The endpoint as written, for messages only.
-        let written = || format!("{}:{}", end.device, end.name);
-        let problem = |message: String| Problem::new(message, end.span);
         let device = self.layout.find_device(DeviceRef::parse(&end.device), rack, end.span)?;
         let id = &self.layout.device_name(device);
         let Some(model) = self.models[device.0] else {
-            return Err(problem(format!("the model of `{id}` has problems"))
-                .with_label("see the problems reported for its file"));
+            return Err(prb::invalid_model(end, id));
         };
-        let kind: &str = model.kind.into();
         if place == Position::Middle && model.kind != Kind::PatchPanel {
-            return Err(problem("only a patch-panel port can sit in the middle of a path".into())
-                .with_label(format!("`{id}` is a {kind}")));
+            return Err(prb::not_a_patch_port_in_the_middle(end, id, model.kind));
         }
-        let wanted = wanted(&end.name, model.kind, place).map_err(|mistake| {
-            let problem = problem(mistake.message(&written(), id, kind));
-            if matches!(mistake, Mistake::NoMainList) {
-                problem.with_help(format!("name the endpoint, such as `{id}:nic1` or `{id}:psu1`"))
-            } else {
-                problem
-            }
-        })?;
-
-        let Wanted { part, group, number, sides } = wanted;
+        let Wanted { part, group, number, sides } = wanted(&end.name, model.kind, place)
+            .map_err(|mistake| prb::mistake(&mistake, end, id, model.kind))?;
         let index = match number {
             Some(number) => model.endpoint_index(part, group, number),
             None if group.is_none() && model.components.count(part) == 1 => Some(0),
@@ -228,19 +208,8 @@ impl Devices<'_> {
         };
         let socket = index.and_then(|index| cabling.socket(device, part, index));
         let Some(socket) = socket else {
-            let written = written();
-            let (noun, _) = part_names(part);
-            return Err(problem(match (describe_endpoints(model, part), number) {
-                (Some(endpoints), None) => {
-                    format!("`{written}` needs a number: `{id}` has {endpoints}")
-                }
-                (Some(endpoints), Some(_)) => {
-                    format!("`{written}` does not exist: `{id}` has {endpoints}")
-                }
-                (None, _) => {
-                    format!("`{written}` does not exist: the model of `{id}` has no {noun}s")
-                }
-            }));
+            let endpoints = describe_endpoints(model, part);
+            return Err(prb::no_such_endpoint(end, id, part, endpoints, number.is_some()));
         };
         Ok(Found { socket, part, sides })
     }
@@ -268,34 +237,6 @@ enum Mistake {
     NotAPatchPanel,
     /// A part name with capitals, such as `PSU`, and the name written correctly.
     Capitalised { word: String, fixed: String },
-}
-
-impl Mistake {
-    /// Describes the mistake in the endpoint `written` of the device `id` of `kind`.
-    fn message(&self, written: &str, id: &str, kind: &str) -> String {
-        match self {
-            Self::NoSide => format!(
-                "`{written}` needs a side: a patch-panel port is written such as `{id}:b14` or \
-                 `{id}:f14`"
-            ),
-            Self::NoMainList => {
-                format!("`{written}` needs an endpoint name: a {kind} has no numbered main list")
-            }
-            Self::NotBothSides => format!(
-                "in the middle of a path, a patch port gives both sides, such as `{id}:b-f14`"
-            ),
-            Self::NotASide(word) => {
-                format!("a patch side is `b`, `back`, `f` or `front`, found `{word}`")
-            }
-            Self::NotAPatchPanel => {
-                format!("only patch-panel ports have sides: `{id}` is a {kind}")
-            }
-            Self::Capitalised { word, fixed } => format!(
-                "`{written}` names the part `{word}`: part names are lowercase, such as \
-                 `{id}:{fixed}`"
-            ),
-        }
-    }
 }
 
 /// Returns the mistake of a part name written with capitals, such as `PSU1`.
@@ -359,44 +300,25 @@ fn wanted(name: &EndpointName, kind: Kind, place: Position) -> Result<Wanted<'_>
 /// Reports endpoints that do not fit the link: power runs from an outlet into a PSU, and
 /// data links connect NICs, management ports and ports.
 fn check_parts(path: &CablePath, found: &[Found], problems: &mut Vec<Problem>) {
-    let wrong = |end: &EndpointRef, found: &Found, message: String| {
-        let (noun, _) = part_names(found.part);
-        Problem::new(message, end.span).with_label(format!("this is {}", with_article(noun)))
-    };
     let pairs = path.endpoints.iter().zip(found);
     match path.kind {
         LinkKind::Power => {
             for (index, (end, found)) in pairs.enumerate() {
-                let (part, message) = if index == 0 {
-                    (Part::Outlet, "a `power` link starts at an outlet")
-                } else {
-                    (Part::Psu, "a `power` link ends at a PSU")
-                };
-                if found.part != part {
-                    problems.push(wrong(end, found, message.to_owned()));
+                if index == 0 && found.part != Part::Outlet {
+                    problems.push(prb::power_not_from_an_outlet(end, found.part));
+                } else if index > 0 && found.part != Part::Psu {
+                    problems.push(prb::power_not_into_a_psu(end, found.part));
                 }
             }
         }
         LinkKind::Net | LinkKind::Mgmt => {
-            let kind: &str = path.kind.into();
             for (end, found) in pairs {
                 if !matches!(found.part, Part::Nic | Part::Mgmt | Part::Port) {
-                    let message =
-                        format!("a `{kind}` link connects NICs, management ports and ports");
-                    problems.push(wrong(end, found, message));
+                    problems.push(prb::not_a_data_endpoint(path.kind, end, found.part));
                 }
             }
         }
     }
-}
-
-/// Reports an endpoint, or a side of a patch port, that already takes a cable.
-fn already_connected(end: End, written: &EndpointRef, first: Place) -> Problem {
-    let side = end.side.map_or_else(String::new, |side| format!(" at the {}", side.name()));
-    let message = format!("`{}:{}` is already connected{side}", written.device, written.name);
-    Problem::new(message, written.span)
-        .with_label("connected again here")
-        .with_place(first, "first connected")
 }
 
 /// Returns the endpoint part `word` names, such as `psu`.
@@ -428,10 +350,145 @@ fn describe_endpoints(model: &Model, part: Part) -> Option<String> {
     }
 }
 
-/// Puts `a` or `an` before a noun.
-fn with_article(noun: &str) -> String {
-    let article = if noun.starts_with(['a', 'e', 'i', 'o', 'u']) { "an" } else { "a" };
-    format!("{article} {noun}")
+/// The problems reported for the wiring's endpoints and cables.
+mod prb {
+    use miette::SourceSpan;
+
+    use super::{End, EndpointRef, LinkKind, Mistake};
+    use crate::catalog::{Kind, Part, part_names};
+    use crate::kdl_reader::{Place, Problem};
+
+    /// `message` says why the text at `span` is not an endpoint.
+    pub(super) fn not_an_endpoint(message: String, span: SourceSpan) -> Problem {
+        Problem::new(message, span)
+    }
+
+    /// `id` names the device of `end`.
+    pub(super) fn invalid_model(end: &EndpointRef, id: &str) -> Problem {
+        Problem::new(format!("the model of `{id}` has problems"), end.span)
+            .with_label("see the problems reported for its file")
+    }
+
+    /// `id` names the device of `end`, which is of `kind`.
+    pub(super) fn not_a_patch_port_in_the_middle(
+        end: &EndpointRef,
+        id: &str,
+        kind: Kind,
+    ) -> Problem {
+        let kind: &str = kind.into();
+        Problem::new("only a patch-panel port can sit in the middle of a path", end.span)
+            .with_label(format!("`{id}` is a {kind}"))
+    }
+
+    /// `id` names the device of `end`, which is of `kind`.
+    pub(super) fn mistake(mistake: &Mistake, end: &EndpointRef, id: &str, kind: Kind) -> Problem {
+        let written = written(end);
+        let kind: &str = kind.into();
+        let message = match mistake {
+            Mistake::NoSide => format!(
+                "`{written}` needs a side: a patch-panel port is written such as `{id}:b14` or \
+                 `{id}:f14`"
+            ),
+            Mistake::NoMainList => {
+                format!("`{written}` needs an endpoint name: a {kind} has no numbered main list")
+            }
+            Mistake::NotBothSides => format!(
+                "in the middle of a path, a patch port gives both sides, such as `{id}:b-f14`"
+            ),
+            Mistake::NotASide(word) => {
+                format!("a patch side is `b`, `back`, `f` or `front`, found `{word}`")
+            }
+            Mistake::NotAPatchPanel => {
+                format!("only patch-panel ports have sides: `{id}` is a {kind}")
+            }
+            Mistake::Capitalised { word, fixed } => format!(
+                "`{written}` names the part `{word}`: part names are lowercase, such as \
+                 `{id}:{fixed}`"
+            ),
+        };
+        let problem = Problem::new(message, end.span);
+        if matches!(mistake, Mistake::NoMainList) {
+            problem.with_help(format!("name the endpoint, such as `{id}:nic1` or `{id}:psu1`"))
+        } else {
+            problem
+        }
+    }
+
+    /// `id` names the device of `end`. `endpoints` describes its endpoints of `part`, if it
+    /// has any, and `numbered` tells whether `end` gives a number.
+    pub(super) fn no_such_endpoint(
+        end: &EndpointRef,
+        id: &str,
+        part: Part,
+        endpoints: Option<String>,
+        numbered: bool,
+    ) -> Problem {
+        let written = written(end);
+        let message = match endpoints {
+            Some(endpoints) if numbered => {
+                format!("`{written}` does not exist: `{id}` has {endpoints}")
+            }
+            Some(endpoints) => format!("`{written}` needs a number: `{id}` has {endpoints}"),
+            None => {
+                let (noun, _) = part_names(part);
+                format!("`{written}` does not exist: the model of `{id}` has no {noun}s")
+            }
+        };
+        Problem::new(message, end.span)
+    }
+
+    /// `end` is of `part`.
+    pub(super) fn power_not_from_an_outlet(end: &EndpointRef, part: Part) -> Problem {
+        wrong_part("a `power` link starts at an outlet", end, part)
+    }
+
+    /// `end` is of `part`.
+    pub(super) fn power_not_into_a_psu(end: &EndpointRef, part: Part) -> Problem {
+        wrong_part("a `power` link ends at a PSU", end, part)
+    }
+
+    /// `end` is of `part`, on a link of `kind`.
+    pub(super) fn not_a_data_endpoint(kind: LinkKind, end: &EndpointRef, part: Part) -> Problem {
+        let kind: &str = kind.into();
+        let message = format!("a `{kind}` link connects NICs, management ports and ports");
+        wrong_part(message, end, part)
+    }
+
+    /// The two ends of a cable, `end` and `other`, are the same endpoint of `part`.
+    pub(super) fn connected_to_itself(
+        part: Part,
+        end: &EndpointRef,
+        other: &EndpointRef,
+    ) -> Problem {
+        let (noun, _) = part_names(part);
+        let message = format!("a cable cannot connect {} to itself", with_article(noun));
+        Problem::new(message, end.span).with_label("the same").with_label_at(other.span, "as this")
+    }
+
+    /// `written` is an endpoint, or a side of a patch port, first used at `first`.
+    pub(super) fn already_connected(end: End, written: &EndpointRef, first: Place) -> Problem {
+        let side = end.side.map_or_else(String::new, |side| format!(" at the {}", side.name()));
+        let message = format!("`{}` is already connected{side}", self::written(written));
+        Problem::new(message, written.span)
+            .with_label("connected again here")
+            .with_place(first, "first connected")
+    }
+
+    fn wrong_part(message: impl Into<String>, end: &EndpointRef, part: Part) -> Problem {
+        let (noun, _) = part_names(part);
+        Problem::new(message, end.span).with_label(format!("this is {}", with_article(noun)))
+    }
+
+    /// The endpoint as written.
+    fn written(end: &EndpointRef) -> String {
+        format!("{}:{}", end.device, end.name)
+    }
+
+    /// Puts `a` or `an` before a noun.
+    fn with_article(noun: &str) -> String {
+        let article = if noun.starts_with(['a', 'e', 'i', 'o', 'u']) { "an" } else { "a" };
+        format!("{article} {noun}")
+    }
 }
 
 #[cfg(test)]
