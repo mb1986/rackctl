@@ -64,7 +64,15 @@ wiring {
 ```
 
 With several racks, a device is written with its rack, as `office.switch:28`. Its name alone
-is enough when only one rack has a device of that name.
+is enough when only one rack has a device of that name, or inside a wiring that names its
+rack:
+
+```kdl
+wiring rack="homelab" {
+  power pdu:7 server:psu2
+  net   switch:28 office.switch:28
+}
+```
 
 ## Building
 
