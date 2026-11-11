@@ -207,10 +207,7 @@ fn read_model(id: &str, node: &KdlNode, problems: &mut Vec<Problem>) -> Option<M
     for child in block.map(KdlDocument::nodes).unwrap_or_default() {
         let key = child.name().value();
         if !seen.insert(key) && NODES.contains(&key) && !REPEATABLE.contains(&key) {
-            problems.push(Problem::new(
-                format!("`{key}` is given more than once"),
-                child.name().span(),
-            ));
+            problems.push(prb::repeated_node(child));
         }
 
         match key {
@@ -223,7 +220,7 @@ fn read_model(id: &str, node: &KdlNode, problems: &mut Vec<Problem>) -> Option<M
             "height" => {
                 height = single(child, problems, |n| n.arg_int::<u8>(0, "height"));
                 if height == Some(0) {
-                    problems.push(Problem::new("`height` must be at least 1", child.span()));
+                    problems.push(prb::height_is_zero(child));
                     // Reported once, so the faces are not checked against it.
                     height = None;
                 }
@@ -246,10 +243,7 @@ fn read_model(id: &str, node: &KdlNode, problems: &mut Vec<Problem>) -> Option<M
                 legend = read_legend(child, problems);
                 legend_span = Some(child.name().span());
             }
-            _ => problems.push(
-                Problem::new(format!("unknown node `{key}` in a model"), child.name().span())
-                    .with_suggestion(key, NODES.iter().copied()),
-            ),
+            _ => problems.push(prb::unknown_node(child)),
         }
     }
 
@@ -261,19 +255,13 @@ fn read_model(id: &str, node: &KdlNode, problems: &mut Vec<Problem>) -> Option<M
     number_faces(&mut faces, &legend, &components, problems);
     // A face that is present but invalid has already been reported.
     if let Some(span) = legend_span.filter(|_| !seen.contains("face")) {
-        problems.push(
-            Problem::new("a `legend` needs a `face` to describe", span)
-                .with_help("add a `face` or remove the `legend`"),
-        );
+        problems.push(prb::legend_without_a_face(span));
     }
     check_patch_panel(kind, &legend, problems);
     // A node that is present but invalid has already been reported.
     for key in ["name", "kind"] {
         if !seen.contains(&key) {
-            problems.push(
-                Problem::new(format!("the model is missing `{key}`"), node.name().span())
-                    .with_label(format!("add `{key}` inside this block")),
-            );
+            problems.push(prb::missing_node(node, key));
         }
     }
     // With other problems, such as two normal faces, it is not known which keys are meant to
@@ -305,10 +293,7 @@ fn check_patch_panel(kind: Option<Kind>, legend: &Legend, problems: &mut Vec<Pro
         return;
     }
     for entry in legend.entries().filter(|entry| entry.numbering.group.is_some()) {
-        problems.push(
-            Problem::new("a patch panel's ports have no groups", entry.span)
-                .with_help("the wiring names a patch port by its side, such as `b14` or `f14`"),
-        );
+        problems.push(prb::group_on_a_patch_panel(entry.span));
     }
 }
 
@@ -329,6 +314,48 @@ fn single<T>(
 fn count(node: &KdlNode, problems: &mut Vec<Problem>) -> u16 {
     let what = format!("number of {}", node.name().value());
     single(node, problems, |n| n.arg_int(0, &what)).unwrap_or(0)
+}
+
+/// The problems reported for a model.
+mod prb {
+    use kdl::KdlNode;
+    use miette::SourceSpan;
+
+    use super::NODES;
+    use crate::kdl_reader::Problem;
+
+    pub(super) fn unknown_node(node: &KdlNode) -> Problem {
+        let key = node.name().value();
+        Problem::new(format!("unknown node `{key}` in a model"), node.name().span())
+            .with_suggestion(key, NODES.iter().copied())
+    }
+
+    pub(super) fn repeated_node(node: &KdlNode) -> Problem {
+        let key = node.name().value();
+        Problem::new(format!("`{key}` is given more than once"), node.name().span())
+    }
+
+    /// `node` is the `model` node, which lacks the node `key`.
+    pub(super) fn missing_node(node: &KdlNode, key: &str) -> Problem {
+        Problem::new(format!("the model is missing `{key}`"), node.name().span())
+            .with_label(format!("add `{key}` inside this block"))
+    }
+
+    pub(super) fn height_is_zero(node: &KdlNode) -> Problem {
+        Problem::new("`height` must be at least 1", node.span())
+    }
+
+    /// `span` is the place of the `legend` node.
+    pub(super) fn legend_without_a_face(span: SourceSpan) -> Problem {
+        Problem::new("a `legend` needs a `face` to describe", span)
+            .with_help("add a `face` or remove the `legend`")
+    }
+
+    /// `span` is the place of the legend entry that gives a group.
+    pub(super) fn group_on_a_patch_panel(span: SourceSpan) -> Problem {
+        Problem::new("a patch panel's ports have no groups", span)
+            .with_help("the wiring names a patch port by its side, such as `b14` or `f14`")
+    }
 }
 
 #[cfg(test)]
