@@ -11,14 +11,17 @@ use strum::{EnumString, IntoStaticStr, VariantNames};
 
 pub use cabling::{Cabling, End, Endpoint, Link, SocketId};
 pub use endpoint::{EndpointName, EndpointRef, PatchSide, endpoint_name, parse_endpoint};
+pub use resolve::resolve;
 
-use crate::kdl_reader::{self, FileId, NodeReader, Problem, span_of};
+use crate::kdl_reader::{self, FileId, NodeReader, Problem, Spanned, span_of};
 
 /// The cables of a `wiring` node as written, before their endpoints are looked up in the rack.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Wiring {
     /// The statements in the order they appear in the file.
     pub paths: Vec<CablePath>,
+    /// The rack given with `rack=`, whose devices the names written alone mean.
+    pub rack: Option<Spanned<String>>,
     /// The file the wiring is described in.
     pub file: FileId,
 }
@@ -61,15 +64,17 @@ impl Wiring {
 /// Reads the `wiring { ... }` node.
 pub(crate) fn read_wiring(node: &KdlNode, file: FileId, problems: &mut Vec<Problem>) -> Wiring {
     let mut reader = NodeReader::new(node, problems);
+    let rack = reader.opt_str("rack");
     let block = reader.children();
     reader.finish();
+    let rack = rack.map(|value| Spanned { value, span: span_of(node, "rack") });
     let paths = block
         .map(KdlDocument::nodes)
         .unwrap_or_default()
         .iter()
         .filter_map(|child| read_path(child, problems))
         .collect();
-    Wiring { paths, file }
+    Wiring { paths, rack, file }
 }
 
 /// Reads a statement such as `net srv01:nic1 patch-32:b-f14 sg300:11`.

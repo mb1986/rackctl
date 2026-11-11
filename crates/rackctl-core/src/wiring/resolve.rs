@@ -6,7 +6,7 @@ use super::cabling::{Cabling, DeviceEndpoints, End, Link, SocketId};
 use super::endpoint::main_part;
 use super::{CablePath, EndpointName, EndpointRef, LinkKind, PatchSide, Wiring, parse_endpoint};
 use crate::catalog::{Catalog, Kind, Model, Part, part_names};
-use crate::kdl_reader::Problem;
+use crate::kdl_reader::{FileId, Place, Problem};
 use crate::rack::{DeviceRef, Layout};
 
 /// An endpoint found in the layout.
@@ -21,7 +21,7 @@ struct Found {
 
 /// Where an endpoint is written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Place {
+enum Position {
     /// First or last in a path.
     End,
     /// Between two others in a path.
@@ -45,40 +45,89 @@ impl<'a> Devices<'a> {
 }
 
 impl Wiring {
-    /// Looks up every endpoint in `layout`, whose models come from `catalog`, and checks
-    /// the cables: the endpoints they connect, and that each endpoint, or each side of a
-    /// patch port, takes one cable.
+    /// Resolves this wiring alone, as [`resolve`] does for every wiring of a configuration.
     ///
     /// # Errors
     ///
     /// Returns every problem found, located in the wiring's file.
     pub fn resolve(&self, layout: &Layout, catalog: &Catalog) -> Result<Cabling, Vec<Problem>> {
-        let devices = Devices::new(layout, catalog);
-        let endpoints: Vec<DeviceEndpoints> = devices
-            .models
-            .iter()
-            .map(|model| DeviceEndpoints {
-                counts: Part::ENDPOINTS.map(|part| model.map_or(0, |m| m.components.count(part))),
-                patch_panel: model.is_some_and(|model| model.kind == Kind::PatchPanel),
-            })
-            .collect();
-        let mut cabling = Cabling::new(&endpoints);
-        // Where each socket, or each side of a patch port, is first used, by `End::place`.
-        let mut first_uses: Vec<Option<SourceSpan>> = vec![None; cabling.places()];
+        resolve(std::slice::from_ref(self), layout, catalog).map_err(|problems| {
+            let settle =
+                |(file, problem): (FileId, Problem)| problem.settle(file, |_| String::new());
+            problems.into_iter().map(settle).collect()
+        })
+    }
+}
+
+/// Looks up every endpoint of `wirings` in `layout`, whose models come from `catalog`, and
+/// checks the cables.
+///
+/// A cable connects endpoints that fit its type, and each endpoint, or each side of a patch
+/// port, takes one cable. A device written by its name alone is looked up in the rack its
+/// wiring names, if any.
+///
+/// # Errors
+///
+/// Returns every problem found, each with the file it is located in.
+pub fn resolve(
+    wirings: &[Wiring],
+    layout: &Layout,
+    catalog: &Catalog,
+) -> Result<Cabling, Vec<(FileId, Problem)>> {
+    let devices = Devices::new(layout, catalog);
+    let endpoints: Vec<DeviceEndpoints> = devices
+        .models
+        .iter()
+        .map(|model| DeviceEndpoints {
+            counts: Part::ENDPOINTS.map(|part| model.map_or(0, |m| m.components.count(part))),
+            patch_panel: model.is_some_and(|model| model.kind == Kind::PatchPanel),
+        })
+        .collect();
+    let mut cabling = Cabling::new(&endpoints);
+    // Where each socket, or each side of a patch port, is first used, by `End::place`.
+    let mut first_uses: Vec<Option<Place>> = vec![None; cabling.places()];
+    let mut all = Vec::new();
+    for wiring in wirings {
         let mut problems = Vec::new();
+        wiring.connect(&devices, &mut cabling, &mut first_uses, &mut problems);
+        all.extend(problems.into_iter().map(|problem| (wiring.file, problem)));
+    }
+    if all.is_empty() { Ok(cabling) } else { Err(all) }
+}
+
+impl Wiring {
+    /// Adds the cables of this wiring to `cabling`. `first_uses` tells where each socket, or
+    /// each side of a patch port, is first used.
+    fn connect(
+        &self,
+        devices: &Devices,
+        cabling: &mut Cabling,
+        first_uses: &mut [Option<Place>],
+        problems: &mut Vec<Problem>,
+    ) {
+        let rack = match &self.rack {
+            Some(rack) => match devices.layout.find_rack(&rack.value, rack.span) {
+                Ok(_) => Some(rack.value.as_str()),
+                Err(problem) => {
+                    problems.push(problem);
+                    return;
+                }
+            },
+            None => None,
+        };
         for path in &self.paths {
             let before = problems.len();
             let last = path.endpoints.len().saturating_sub(1);
             let mut found = Vec::new();
             for (at, end) in path.endpoints.iter().enumerate() {
-                let place = if at == 0 || at == last { Place::End } else { Place::Middle };
-                match devices.find(end, place, &cabling) {
+                let place = if at == 0 || at == last { Position::End } else { Position::Middle };
+                match devices.find(end, place, cabling, rack) {
                     Ok(end) => found.push(end),
                     Err(problem) => problems.push(problem),
                 }
             }
             if problems.len() == before {
-                check_parts(path, &found, &mut problems);
+                check_parts(path, &found, problems);
             }
             if problems.len() > before {
                 continue;
@@ -107,7 +156,7 @@ impl Wiring {
                             problems.push(already_connected(end, written, first));
                             free = false;
                         }
-                        None => *first_use = Some(written.span),
+                        None => *first_use = Some(Place { file: self.file, span: written.span }),
                     }
                 }
                 if free {
@@ -115,7 +164,6 @@ impl Wiring {
                 }
             }
         }
-        if problems.is_empty() { Ok(cabling) } else { Err(problems) }
     }
 }
 
@@ -135,24 +183,31 @@ impl Cabling {
         let span = SourceSpan::from(0..text.len());
         let (device, name) = parse_endpoint(text).map_err(|message| Problem::new(message, span))?;
         let end = EndpointRef { device: device.to_owned(), name, span };
-        Ok(Devices::new(layout, catalog).find(&end, Place::Alone, self)?.socket)
+        Ok(Devices::new(layout, catalog).find(&end, Position::Alone, self, None)?.socket)
     }
 }
 
 impl Devices<'_> {
-    /// Looks up an endpoint written at `place`.
-    fn find(&self, end: &EndpointRef, place: Place, cabling: &Cabling) -> Result<Found, Problem> {
+    /// Looks up an endpoint written at `place`. A device written by its name alone is the one
+    /// of `rack`, when a rack is given.
+    fn find(
+        &self,
+        end: &EndpointRef,
+        place: Position,
+        cabling: &Cabling,
+        rack: Option<&str>,
+    ) -> Result<Found, Problem> {
         // The endpoint as written, for messages only.
         let written = || format!("{}:{}", end.device, end.name);
         let problem = |message: String| Problem::new(message, end.span);
-        let device = self.layout.find_device(DeviceRef::parse(&end.device), None, end.span)?;
+        let device = self.layout.find_device(DeviceRef::parse(&end.device), rack, end.span)?;
         let id = &self.layout.device_name(device);
         let Some(model) = self.models[device.0] else {
             return Err(problem(format!("the model of `{id}` has problems"))
                 .with_label("see the problems reported for its file"));
         };
         let kind: &str = model.kind.into();
-        if place == Place::Middle && model.kind != Kind::PatchPanel {
+        if place == Position::Middle && model.kind != Kind::PatchPanel {
             return Err(problem("only a patch-panel port can sit in the middle of a path".into())
                 .with_label(format!("`{id}` is a {kind}")));
         }
@@ -251,26 +306,26 @@ fn capitalised(word: &str, number: Option<u16>) -> Option<Mistake> {
 }
 
 /// Reads what `name`, written at `place`, asks for on a device of `kind`.
-fn wanted(name: &EndpointName, kind: Kind, place: Place) -> Result<Wanted<'_>, Mistake> {
+fn wanted(name: &EndpointName, kind: Kind, place: Position) -> Result<Wanted<'_>, Mistake> {
     let wanted = |part, group, number, sides| Wanted { part, group, number, sides };
     if kind == Kind::PatchPanel {
         return match name {
             EndpointName::Through { from, number } => {
                 Ok(wanted(Part::Port, None, Some(*number), Some((*from, from.opposite()))))
             }
-            EndpointName::Main(number) if place == Place::Alone => {
+            EndpointName::Main(number) if place == Position::Alone => {
                 Ok(wanted(Part::Port, None, Some(*number), None))
             }
-            EndpointName::Main(_) if place == Place::Middle => Err(Mistake::NotBothSides),
+            EndpointName::Main(_) if place == Position::Middle => Err(Mistake::NotBothSides),
             EndpointName::Main(_) => Err(Mistake::NoSide),
             EndpointName::Named { word, number } => match PatchSide::parse(word) {
-                Some(_) if place == Place::Middle => Err(Mistake::NotBothSides),
+                Some(_) if place == Position::Middle => Err(Mistake::NotBothSides),
                 Some(side) => Ok(wanted(Part::Port, None, *number, Some((side, side)))),
                 None => match endpoint_part(word) {
-                    Some(Part::Port) if place == Place::Alone => {
+                    Some(Part::Port) if place == Position::Alone => {
                         Ok(wanted(Part::Port, None, *number, None))
                     }
-                    Some(Part::Port) if place == Place::Middle => Err(Mistake::NotBothSides),
+                    Some(Part::Port) if place == Position::Middle => Err(Mistake::NotBothSides),
                     Some(Part::Port) => Err(Mistake::NoSide),
                     Some(part) => Ok(wanted(part, None, *number, None)),
                     None => Err(capitalised(word, *number)
@@ -336,12 +391,12 @@ fn check_parts(path: &CablePath, found: &[Found], problems: &mut Vec<Problem>) {
 }
 
 /// Reports an endpoint, or a side of a patch port, that already takes a cable.
-fn already_connected(end: End, written: &EndpointRef, first: SourceSpan) -> Problem {
+fn already_connected(end: End, written: &EndpointRef, first: Place) -> Problem {
     let side = end.side.map_or_else(String::new, |side| format!(" at the {}", side.name()));
     let message = format!("`{}:{}` is already connected{side}", written.device, written.name);
     Problem::new(message, written.span)
         .with_label("connected again here")
-        .with_label_at(first, "first connected here")
+        .with_place(first, "first connected")
 }
 
 /// Returns the endpoint part `word` names, such as `psu`.

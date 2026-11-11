@@ -217,6 +217,17 @@ impl Layout {
         self.racks.binary_search_by(|rack| rack.name.as_str().cmp(name)).ok()
     }
 
+    /// Finds the rack written as `name` at `span`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the problem of a name that no rack has.
+    pub fn find_rack(&self, name: &str, span: SourceSpan) -> Result<&Rack, Problem> {
+        self.rack(name).ok_or_else(|| {
+            prb::unknown_rack(name, span, self.racks.iter().map(|rack| rack.name.as_str()))
+        })
+    }
+
     /// Returns every device in the order of the ids.
     pub fn devices(&self) -> impl Iterator<Item = &Device> {
         self.racks.iter().flat_map(|rack| &rack.devices)

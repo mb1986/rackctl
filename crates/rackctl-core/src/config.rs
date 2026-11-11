@@ -37,15 +37,14 @@ struct Found {
     racks: Vec<Rack>,
     /// Where each rack name is first used.
     rack_names: HashMap<String, Place>,
-    /// The wiring, with the place of its node.
-    wiring: Option<(Wiring, Place)>,
+    wirings: Vec<Wiring>,
 }
 
 /// Loads the configuration at `path`, a directory or a single file, and checks it against
 /// `catalog`.
 ///
 /// The files are those of [`find_files`], and each top-level node says what it holds: a
-/// `rack` or the `wiring`. Problems in model files are reported by [`Catalog::invalid_models`].
+/// `rack` or a `wiring`. Problems in model files are reported by [`Catalog::invalid_models`].
 ///
 /// # Errors
 ///
@@ -78,17 +77,18 @@ pub fn load(path: &Path, catalog: &Catalog) -> Result<Config, Vec<FileError>> {
     }
 
     // The wiring names the racks' devices, so it is resolved only against valid racks.
-    let cabling = match found.wiring {
-        None => None,
-        Some((wiring, _)) => match wiring.resolve(&layout, catalog) {
-            Ok(cabling) => Some(cabling),
-            Err(problems) => {
-                files[wiring.file.0].problems = problems;
-                return Err(errors(files));
+    if found.wirings.is_empty() {
+        return Ok(Config { files: paths, layout, cabling: None });
+    }
+    match wiring::resolve(&found.wirings, &layout, catalog) {
+        Ok(cabling) => Ok(Config { files: paths, layout, cabling: Some(cabling) }),
+        Err(problems) => {
+            for (file, problem) in problems {
+                files[file.0].problems.push(problem);
             }
-        },
-    };
-    Ok(Config { files: paths, layout, cabling })
+            Err(errors(files))
+        }
+    }
 }
 
 /// Reads the file at `path`, the file `id`, and gathers what it holds into `found`.
@@ -116,12 +116,7 @@ fn read_file(path: &Path, id: FileId, found: &mut Found) -> File {
                 found.racks.extend(rack::read_rack(node, id, &mut file.problems));
             }
             "wiring" => {
-                if let Some((_, first)) = &found.wiring {
-                    file.problems.push(prb::second_wiring(node, *first));
-                } else {
-                    let wiring = wiring::read_wiring(node, id, &mut file.problems);
-                    found.wiring = Some((wiring, Place { file: id, span: node.name().span() }));
-                }
+                found.wirings.push(wiring::read_wiring(node, id, &mut file.problems));
             }
             _ => file.problems.push(prb::unknown_top_level(node)),
         }
@@ -243,12 +238,6 @@ mod prb {
         Problem::new(format!("the rack name `{name}` is used more than once"), span)
             .with_label("used again here")
             .with_place(first, "first used")
-    }
-
-    pub(super) fn second_wiring(node: &KdlNode, first: Place) -> Problem {
-        Problem::new("the configuration has more than one `wiring` node", node.name().span())
-            .with_label("given again here")
-            .with_place(first, "first given")
     }
 }
 
@@ -504,15 +493,46 @@ mod tests {
     }
 
     #[test]
-    fn reports_a_second_wiring_node() {
-        let (dir, loaded) =
-            load_in(&[("rack.kdl", RACK), ("w1.kdl", "wiring {}"), ("w2.kdl", "wiring {}")], "");
-        let errors = loaded.expect_err("two wiring nodes");
+    fn gathers_the_cables_of_every_wiring() {
+        let (_dir, loaded) = load_in(
+            &[
+                ("rack.kdl", RACK),
+                ("w1.kdl", "wiring { net a:nic1 b:nic1; }"),
+                ("w2.kdl", "wiring {}\nwiring {}"),
+            ],
+            "",
+        );
+        let config = loaded.expect("valid configuration");
+        assert_eq!(config.cabling.expect("cabling").links().len(), 1);
+    }
+
+    #[test]
+    fn reports_an_endpoint_used_in_two_files() {
+        let (dir, loaded) = load_in(
+            &[
+                ("rack.kdl", RACK),
+                ("w1.kdl", "wiring {\n  net a:nic1 b:nic1\n}"),
+                ("w2.kdl", "wiring { net b:nic1 a:nic1; }"),
+            ],
+            "",
+        );
+        let errors = loaded.expect_err("endpoints used twice");
+        assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].name(), dir.path().join("w2.kdl").display().to_string());
-        let problem = &errors[0].problems()[0];
-        assert_eq!(problem.message(), "the configuration has more than one `wiring` node");
-        let first = dir.path().join("w1.kdl");
-        assert_eq!(problem.help(), Some(&*format!("first given in {}, line 1", first.display())));
+        let first = dir.path().join("w1.kdl").display().to_string();
+        let problems: Vec<_> = errors[0]
+            .problems()
+            .iter()
+            .map(|problem| (problem.message(), problem.help()))
+            .collect();
+        let help = format!("first connected in {first}, line 2");
+        assert_eq!(
+            problems,
+            [
+                ("`b:nic1` is already connected", Some(help.as_str())),
+                ("`a:nic1` is already connected", Some(help.as_str())),
+            ]
+        );
     }
 
     /// The racks `lab` and `office`, each with the servers `a` and `b`, and `lab` with `c`.
@@ -560,6 +580,40 @@ mod tests {
             reported(dir.path(), loaded),
             [in_file("w.kdl", &["`a` is in several racks", "unknown rack `atic`"])]
         );
+    }
+
+    #[test]
+    fn takes_a_name_alone_from_the_rack_of_its_wiring() {
+        let (_dir, loaded) = load_in(
+            &[
+                ("racks.kdl", TWO_RACKS),
+                ("lab.kdl", r#"wiring rack="lab" { net a:nic1 office.a:nic1; }"#),
+                ("office.kdl", r#"wiring rack="office" { net b:nic1 lab.b:nic1; }"#),
+            ],
+            "",
+        );
+        let config = loaded.expect("valid configuration");
+        let cabling = config.cabling.expect("cabling");
+        let catalog = Catalog::default();
+        let name = |end: wiring::End| {
+            wiring::endpoint_name(cabling.endpoint(end.socket), &config.layout, &catalog)
+        };
+        let links: Vec<_> = cabling.links().iter().map(|link| link.ends.map(name)).collect();
+        assert_eq!(links, [["lab.a:nic1", "office.a:nic1"], ["office.b:nic1", "lab.b:nic1"]]);
+    }
+
+    #[test]
+    fn reports_the_rack_of_a_wiring_that_does_not_exist() {
+        let (dir, loaded) = load_in(
+            &[("racks.kdl", TWO_RACKS), ("w.kdl", r#"wiring rack="labb" { net a:nic1 b:nic1; }"#)],
+            "",
+        );
+        let errors = loaded.expect_err("unknown rack");
+        let problem = &errors[0].problems()[0];
+        assert_eq!(problem.message(), "unknown rack `labb`");
+        assert_eq!(problem.help(), Some("did you mean `lab`?"));
+        assert_eq!(errors[0].problems().len(), 1);
+        drop(dir);
     }
 
     #[test]
