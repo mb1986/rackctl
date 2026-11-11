@@ -8,7 +8,6 @@ use super::legend::{Legend, Part, PartKind};
 use super::model::Mount;
 use super::numbering::Numbers;
 use crate::kdl_reader::{NodeReader, Problem};
-use crate::plural;
 
 /// The widest a strip face may be, in columns.
 pub const STRIP_WIDTH: usize = 5;
@@ -227,7 +226,7 @@ impl Face {
                         // A run of stray `_` is reported once.
                         Some(Cell::Literal('_')) => Cell::Literal('_'),
                         _ => {
-                            problems.push(nothing_to_continue('_', span));
+                            problems.push(prb::nothing_on_the_left(span));
                             Cell::Literal('_')
                         }
                     },
@@ -243,7 +242,7 @@ impl Face {
                             Cell::Literal('|')
                         }
                         _ => {
-                            problems.push(nothing_to_continue('|', span));
+                            problems.push(prb::nothing_above(span));
                             Cell::Literal('|')
                         }
                     },
@@ -309,12 +308,7 @@ impl Face {
                 row.get(element.column + element.width).copied().unwrap_or(row[row.len() - 1]);
             element.span = self.bytes_span(element.row, row[element.column], end);
             if !rectangle {
-                problems.push(
-                    Problem::new("this element is not a rectangle", element.span).with_help(
-                        "`_` extends an element along its row and `|` down its column; every \
-                         row of the element must be as wide as its top row",
-                    ),
-                );
+                problems.push(prb::not_a_rectangle(element.span));
             }
         }
     }
@@ -357,26 +351,18 @@ fn link_number_fields(
         let left = numbered_at(field.column.checked_sub(1));
         let right = numbered_at(Some(field.column + field.width));
         let gap = legend.get(field.key).map_or(0, |entry| entry.gap.chars().count());
+        let span = field.span;
         let problem = match (left, right) {
-            (Some(_), Some(_)) => Some("this number field touches numbered elements on both sides"),
-            (None, None) => Some("a number field must touch a bay, port or other numbered element"),
+            (Some(_), Some(_)) => Some(prb::number_field_between_two(span)),
+            (None, None) => Some(prb::number_field_alone(span)),
             _ => None,
         };
-        let span = field.span;
-        if let Some(message) = problem {
-            problems.push(Problem::new(message, span).with_help(
-                "put it directly on the left or right of one numbered element, as in `###o`",
-            ));
+        if let Some(problem) = problem {
+            problems.push(problem);
             continue;
         }
         if field.width <= gap {
-            problems.push(Problem::new(
-                format!(
-                    "this number field has no room for a number besides its gap of {}",
-                    plural(gap, "column")
-                ),
-                span,
-            ));
+            problems.push(prb::number_field_too_narrow(span, gap));
         }
         elements[index].number_of = left.xor(right);
     }
@@ -392,37 +378,12 @@ const fn extends_down(part: Part) -> bool {
     matches!(part.kind(), PartKind::Led | PartKind::List)
 }
 
-/// Reports a `_` or `|` that has no element to continue.
-fn nothing_to_continue(character: char, span: SourceSpan) -> Problem {
-    let (message, help) = if character == '_' {
-        (
-            "`_` has nothing on its left to continue",
-            "`_` extends the LED, numbered element or text on its left, as in `b__` for a bay \
-             three columns wide",
-        )
-    } else {
-        (
-            "`|` has nothing above it to continue",
-            "`|` extends the LED or numbered element above it, as in a `b` over a `|` for a bay \
-             two rows tall",
-        )
-    };
-    Problem::new(message, span).with_help(help)
-}
-
 /// Reports a character that is not exactly one column wide.
 fn width_problem(character: char, span: SourceSpan) -> Option<Problem> {
-    let shown = character.escape_debug();
     match character.width() {
         Some(1) => None,
-        None => Some(Problem::new(
-            format!("control characters such as `{shown}` cannot be drawn"),
-            span,
-        )),
-        Some(width) => Some(Problem::new(
-            format!("`{shown}` is {width} columns wide; every character must be one column"),
-            span,
-        )),
+        None => Some(prb::control_character(character, span)),
+        Some(width) => Some(prb::wide_character(character, width, span)),
     }
 }
 
@@ -439,8 +400,7 @@ pub fn read_face(node: &KdlNode, faces: &mut Faces, problems: &mut Vec<Problem>)
         (true, false) => FaceKind::Compact,
         (false, true) => FaceKind::Strip,
         (true, true) => {
-            problems
-                .push(Problem::new("a face is either compact or a strip, not both", node.span()));
+            problems.push(prb::compact_and_strip(node));
             return;
         }
     };
@@ -451,11 +411,7 @@ pub fn read_face(node: &KdlNode, faces: &mut Faces, problems: &mut Vec<Problem>)
 
     let slot = faces.slot(kind);
     if let Some(first) = slot {
-        problems.push(
-            Problem::new(format!("the model has more than one {} face", kind.name()), span)
-                .with_label("given again here")
-                .with_label_at(first.span, "first given here"),
-        );
+        problems.push(prb::repeated_face(kind, span, first.span));
         return;
     }
     *slot = Some(Face {
@@ -483,24 +439,10 @@ pub fn check_faces(
         let slot = faces.slot(kind);
         let Some(face) = slot else { continue };
         let wrong_kind = match (face.kind, mount) {
-            (FaceKind::Strip, Mount::Rack) => Some(
-                Problem::new("a strip face needs a side-mounted model", face.span)
-                    .with_help("add `mount \"side\"` to the model, or remove `strip=#true`"),
-            ),
-            (FaceKind::Normal | FaceKind::Compact, Mount::Side) => Some(
-                Problem::new(
-                    format!(
-                        "a side-mounted model has only a strip face, not a {} one",
-                        face.kind.name()
-                    ),
-                    face.span,
-                )
-                .with_help(if face.kind == FaceKind::Compact {
-                    "replace `compact=#true` with `strip=#true`"
-                } else {
-                    "add `strip=#true` to the face"
-                }),
-            ),
+            (FaceKind::Strip, Mount::Rack) => Some(prb::strip_on_a_rack_model(face)),
+            (FaceKind::Normal | FaceKind::Compact, Mount::Side) => {
+                Some(prb::not_a_strip_on_a_side_model(face))
+            }
             _ => None,
         };
         if let Some(problem) = wrong_kind {
@@ -514,24 +456,13 @@ pub fn check_faces(
             _ => None,
         };
         if let Some((height, expected)) = expected.filter(|&(_, rows)| rows != face.rows.len()) {
-            problems.push(Problem::new(
-                format!(
-                    "the {} face has {}; a {height}U model needs {}",
-                    face.kind.name(),
-                    plural(face.rows.len(), "row"),
-                    plural(expected, "row")
-                ),
-                face.span,
-            ));
+            problems.push(prb::wrong_row_count(face, height, expected));
         }
         if face.kind == FaceKind::Strip {
             for (row, text) in face.rows().enumerate() {
                 let width = text.chars().count();
                 if width > STRIP_WIDTH {
-                    problems.push(Problem::new(
-                        format!("a strip face is at most {STRIP_WIDTH} columns wide; this row has {width}"),
-                        face.row_span(row),
-                    ));
+                    problems.push(prb::strip_row_too_wide(face.row_span(row), width));
                 }
             }
         }
@@ -574,20 +505,7 @@ pub fn check_glyphs(faces: &Faces, legend: &Legend, problems: &mut Vec<Problem>)
                 element.key == entry.key && length > 1 && element.width * element.height != length
             });
             if let Some(element) = misfit {
-                let cells = plural(element.width * element.height, "cell");
-                problems.push(
-                    Problem::new(
-                        format!(
-                            "this glyph has {length} characters, but a `{}` element covers {cells}",
-                            entry.key
-                        ),
-                        glyph.span,
-                    )
-                    .with_label_at(element.span, format!("covers {cells}"))
-                    .with_help(
-                        "a glyph is one character, which fills the element, or one per cell",
-                    ),
-                );
+                problems.push(prb::glyph_does_not_fit(glyph.span, length, element));
             }
         }
     }
@@ -597,13 +515,7 @@ pub fn check_glyphs(faces: &Faces, legend: &Legend, problems: &mut Vec<Problem>)
 pub fn check_unused_keys(faces: &Faces, legend: &Legend, problems: &mut Vec<Problem>) {
     for entry in legend.entries() {
         if !faces.iter().flat_map(Face::elements).any(|element| element.key == entry.key) {
-            problems.push(
-                Problem::new(
-                    format!("legend key `{}` is not used by any face", entry.key),
-                    entry.span,
-                )
-                .with_help("use it in a picture, or remove it from the legend"),
-            );
+            problems.push(prb::unused_key(entry.key, entry.span));
         }
     }
 }
@@ -656,6 +568,141 @@ fn kdl_lines(text: &str) -> Vec<(usize, &str)> {
     }
     lines.push((start, &text[start..]));
     lines
+}
+
+/// The problems reported for faces.
+mod prb {
+    use kdl::KdlNode;
+    use miette::SourceSpan;
+
+    use super::{Element, Face, FaceKind, STRIP_WIDTH};
+    use crate::kdl_reader::Problem;
+    use crate::plural;
+
+    pub(super) fn compact_and_strip(node: &KdlNode) -> Problem {
+        Problem::new("a face is either compact or a strip, not both", node.span())
+    }
+
+    pub(super) fn repeated_face(kind: FaceKind, span: SourceSpan, first: SourceSpan) -> Problem {
+        Problem::new(format!("the model has more than one {} face", kind.name()), span)
+            .with_label("given again here")
+            .with_label_at(first, "first given here")
+    }
+
+    pub(super) fn strip_on_a_rack_model(face: &Face) -> Problem {
+        Problem::new("a strip face needs a side-mounted model", face.span)
+            .with_help("add `mount \"side\"` to the model, or remove `strip=#true`")
+    }
+
+    pub(super) fn not_a_strip_on_a_side_model(face: &Face) -> Problem {
+        let name = face.kind.name();
+        Problem::new(
+            format!("a side-mounted model has only a strip face, not a {name} one"),
+            face.span,
+        )
+        .with_help(if face.kind == FaceKind::Compact {
+            "replace `compact=#true` with `strip=#true`"
+        } else {
+            "add `strip=#true` to the face"
+        })
+    }
+
+    /// A model of `height` units needs `expected` rows.
+    pub(super) fn wrong_row_count(face: &Face, height: usize, expected: usize) -> Problem {
+        let (name, rows) = (face.kind.name(), plural(face.rows.len(), "row"));
+        let expected = plural(expected, "row");
+        Problem::new(
+            format!("the {name} face has {rows}; a {height}U model needs {expected}"),
+            face.span,
+        )
+    }
+
+    /// The row at `span` is `width` columns wide.
+    pub(super) fn strip_row_too_wide(span: SourceSpan, width: usize) -> Problem {
+        Problem::new(
+            format!("a strip face is at most {STRIP_WIDTH} columns wide; this row has {width}"),
+            span,
+        )
+    }
+
+    pub(super) fn control_character(character: char, span: SourceSpan) -> Problem {
+        let shown = character.escape_debug();
+        Problem::new(format!("control characters such as `{shown}` cannot be drawn"), span)
+    }
+
+    pub(super) fn wide_character(character: char, width: usize, span: SourceSpan) -> Problem {
+        let shown = character.escape_debug();
+        Problem::new(
+            format!("`{shown}` is {width} columns wide; every character must be one column"),
+            span,
+        )
+    }
+
+    /// A `_` with no element to continue.
+    pub(super) fn nothing_on_the_left(span: SourceSpan) -> Problem {
+        Problem::new("`_` has nothing on its left to continue", span).with_help(
+            "`_` extends the LED, numbered element or text on its left, as in `b__` for a bay \
+             three columns wide",
+        )
+    }
+
+    /// A `|` with no element to continue.
+    pub(super) fn nothing_above(span: SourceSpan) -> Problem {
+        Problem::new("`|` has nothing above it to continue", span).with_help(
+            "`|` extends the LED or numbered element above it, as in a `b` over a `|` for a bay \
+             two rows tall",
+        )
+    }
+
+    pub(super) fn not_a_rectangle(span: SourceSpan) -> Problem {
+        Problem::new("this element is not a rectangle", span).with_help(
+            "`_` extends an element along its row and `|` down its column; every row of the \
+             element must be as wide as its top row",
+        )
+    }
+
+    pub(super) fn number_field_between_two(span: SourceSpan) -> Problem {
+        number_field("this number field touches numbered elements on both sides", span)
+    }
+
+    pub(super) fn number_field_alone(span: SourceSpan) -> Problem {
+        number_field("a number field must touch a bay, port or other numbered element", span)
+    }
+
+    /// The field's gap takes `gap` columns.
+    pub(super) fn number_field_too_narrow(span: SourceSpan, gap: usize) -> Problem {
+        let gap = plural(gap, "column");
+        Problem::new(
+            format!("this number field has no room for a number besides its gap of {gap}"),
+            span,
+        )
+    }
+
+    /// The glyph at `span` has `length` characters, and `element` is drawn with it.
+    pub(super) fn glyph_does_not_fit(
+        span: SourceSpan,
+        length: usize,
+        element: &Element,
+    ) -> Problem {
+        let cells = plural(element.width * element.height, "cell");
+        let key = element.key;
+        Problem::new(
+            format!("this glyph has {length} characters, but a `{key}` element covers {cells}"),
+            span,
+        )
+        .with_label_at(element.span, format!("covers {cells}"))
+        .with_help("a glyph is one character, which fills the element, or one per cell")
+    }
+
+    pub(super) fn unused_key(key: char, span: SourceSpan) -> Problem {
+        Problem::new(format!("legend key `{key}` is not used by any face"), span)
+            .with_help("use it in a picture, or remove it from the legend")
+    }
+
+    fn number_field(message: &str, span: SourceSpan) -> Problem {
+        Problem::new(message, span)
+            .with_help("put it directly on the left or right of one numbered element, as in `###o`")
+    }
 }
 
 #[cfg(test)]
