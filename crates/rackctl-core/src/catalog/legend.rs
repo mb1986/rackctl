@@ -306,11 +306,7 @@ pub fn read_legend(node: &KdlNode, problems: &mut Vec<Problem>) -> Legend {
         let Some(key) = read_key(child, problems) else { continue };
         let span = child.name().span();
         if let Some(&(_, first)) = keys.iter().find(|&&(other, _)| other == key) {
-            problems.push(
-                Problem::new(format!("legend key `{key}` is given more than once"), span)
-                    .with_label("given again here")
-                    .with_label_at(first, "first given here"),
-            );
+            problems.push(prb::repeated_key(key, span, first));
             continue;
         }
         keys.push((key, span));
@@ -408,7 +404,7 @@ fn read_entry(node: &KdlNode, key: char, problems: &mut Vec<Problem>) -> Option<
             invalid.push((glyph.span, message));
         }
     }
-    problems.extend(invalid.into_iter().map(|(span, message)| Problem::new(message, span)));
+    problems.extend(invalid.into_iter().map(|(span, message)| prb::invalid_text(message, span)));
     Some(entry)
 }
 
@@ -431,46 +427,19 @@ fn entry_type<'n>(
         Some(name) => name.to_owned(),
         None if has_argument => NodeReader::new(node, problems).arg_str(0, "type")?,
         None => {
-            problems.push(
-                Problem::new(format!("legend key `{key}` has no type"), node.span())
-                    .with_help(format!("give it a type, for example `{key} bay`")),
-            );
+            problems.push(prb::no_type(node, key));
             return None;
         }
     };
     let Ok(part) = type_name.parse::<Part>() else {
-        problems.push(unknown_type(node, key, &type_name, shorthand.is_some()));
+        problems.push(prb::unknown_type(node, key, &type_name, shorthand.is_some()));
         return None;
     };
     if has_argument && node.entry(type_name.as_str()).is_some() {
-        problems.push(
-            Problem::new(
-                format!("the type of `{key}` is given twice"),
-                span_of(node, type_name.as_str()),
-            )
-            .with_help(format!(
-                "write it once: `{key} {type_name}` or `{key} {type_name}=\"...\"`"
-            )),
-        );
+        problems.push(prb::type_given_twice(node, key, &type_name));
         return None;
     }
     Some((part, shorthand))
-}
-
-/// Reports an unknown legend type, with a hint at the likely intent.
-fn unknown_type(node: &KdlNode, key: char, type_name: &str, shorthand: bool) -> Problem {
-    let span = if shorthand { span_of(node, type_name) } else { span_of(node, 0) };
-    let problem = Problem::new(format!("unknown legend type `{type_name}`"), span);
-    if type_name == "health" {
-        return problem.with_help("the power LED shows the health; use `power`");
-    }
-    // In the shorthand, a valid type written after an option, as in `b first=0 bay="■"`.
-    let mut later =
-        node.entries().iter().filter_map(KdlEntry::name).skip(1).map(KdlIdentifier::value);
-    if let Some(found) = later.find(|name| name.parse::<Part>().is_ok()).filter(|_| shorthand) {
-        return problem.with_help(format!("the type must come first: `{key} {found}=...`"));
-    }
-    problem.with_suggestion(type_name, Part::VARIANTS.iter().copied())
 }
 
 /// Checks a glyph or text written in a model file: it must not be empty or contain control
@@ -574,18 +543,14 @@ fn read_key(node: &KdlNode, problems: &mut Vec<Problem>) -> Option<char> {
     let name = node.name().value();
     let span = node.name().span();
     // Keys such as a tab are shown escaped, so that the message stays readable.
-    let shown = name.escape_debug();
+    let shown = name.escape_debug().to_string();
     let mut chars = name.chars();
     let problem = match (chars.next(), chars.next()) {
         (Some(key), None) if is_key(key) => return Some(key),
-        (Some('_' | '|'), None) => Problem::new(format!("`{name}` cannot be a legend key"), span)
-            .with_help("`_` and `|` continue the field to the left and above in the picture"),
-        (Some(_), None) => Problem::new(
-            format!("legend key `{shown}` must be an ASCII letter or punctuation"),
-            span,
-        ),
-        (None, _) => Problem::new("a legend key must not be empty", span),
-        _ => Problem::new(format!("legend key `{shown}` must be a single character"), span),
+        (Some('_' | '|'), None) => prb::reserved_key(name, span),
+        (Some(_), None) => prb::not_a_key_character(&shown, span),
+        (None, _) => prb::empty_key(span),
+        _ => prb::long_key(&shown, span),
     };
     problems.push(problem);
     None
@@ -685,6 +650,80 @@ fn parse_group(text: &str) -> Result<String, String> {
         ));
     }
     Ok(text.to_owned())
+}
+
+/// The problems reported for a legend.
+mod prb {
+    use kdl::{KdlEntry, KdlIdentifier, KdlNode};
+    use miette::SourceSpan;
+    use strum::VariantNames;
+
+    use super::Part;
+    use crate::kdl_reader::{Problem, span_of};
+
+    /// `name` is `_` or `|`.
+    pub(super) fn reserved_key(name: &str, span: SourceSpan) -> Problem {
+        Problem::new(format!("`{name}` cannot be a legend key"), span)
+            .with_help("`_` and `|` continue the field to the left and above in the picture")
+    }
+
+    /// `shown` is the key, escaped to stay readable.
+    pub(super) fn not_a_key_character(shown: &str, span: SourceSpan) -> Problem {
+        Problem::new(format!("legend key `{shown}` must be an ASCII letter or punctuation"), span)
+    }
+
+    pub(super) fn empty_key(span: SourceSpan) -> Problem {
+        Problem::new("a legend key must not be empty", span)
+    }
+
+    /// `shown` is the key, escaped to stay readable.
+    pub(super) fn long_key(shown: &str, span: SourceSpan) -> Problem {
+        Problem::new(format!("legend key `{shown}` must be a single character"), span)
+    }
+
+    pub(super) fn repeated_key(key: char, span: SourceSpan, first: SourceSpan) -> Problem {
+        Problem::new(format!("legend key `{key}` is given more than once"), span)
+            .with_label("given again here")
+            .with_label_at(first, "first given here")
+    }
+
+    pub(super) fn no_type(node: &KdlNode, key: char) -> Problem {
+        Problem::new(format!("legend key `{key}` has no type"), node.span())
+            .with_help(format!("give it a type, for example `{key} bay`"))
+    }
+
+    /// The entry `key` gives `type_name` both as its argument and as a property.
+    pub(super) fn type_given_twice(node: &KdlNode, key: char, type_name: &str) -> Problem {
+        Problem::new(format!("the type of `{key}` is given twice"), span_of(node, type_name))
+            .with_help(format!("write it once: `{key} {type_name}` or `{key} {type_name}=\"...\"`"))
+    }
+
+    /// Hints at the likely intent. `shorthand` tells whether the type is written as the name
+    /// of the first property, as in `b bay="..."`.
+    pub(super) fn unknown_type(
+        node: &KdlNode,
+        key: char,
+        type_name: &str,
+        shorthand: bool,
+    ) -> Problem {
+        let span = if shorthand { span_of(node, type_name) } else { span_of(node, 0) };
+        let problem = Problem::new(format!("unknown legend type `{type_name}`"), span);
+        if type_name == "health" {
+            return problem.with_help("the power LED shows the health; use `power`");
+        }
+        // In the shorthand, a valid type written after an option, as in `b first=0 bay="..."`.
+        let mut later =
+            node.entries().iter().filter_map(KdlEntry::name).skip(1).map(KdlIdentifier::value);
+        if let Some(found) = later.find(|name| name.parse::<Part>().is_ok()).filter(|_| shorthand) {
+            return problem.with_help(format!("the type must come first: `{key} {found}=...`"));
+        }
+        problem.with_suggestion(type_name, Part::VARIANTS.iter().copied())
+    }
+
+    /// `message` says what is wrong with the glyph or text at `span`.
+    pub(super) fn invalid_text(message: String, span: SourceSpan) -> Problem {
+        Problem::new(message, span)
+    }
 }
 
 #[cfg(test)]
