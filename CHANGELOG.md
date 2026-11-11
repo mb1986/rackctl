@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the configuration can be split into files in any way. The configuration is taken from
   `-c`, `$RACKCTL_CONFIG` or `$XDG_CONFIG_HOME/rackctl` (by default `~/.config/rackctl`);
   user models are read from `catalog/` in the directory, or next to a single file. Each
-  problem is reported in the file it comes from.
+  problem is reported in the file it comes from, named by its path in the directory.
 - Several racks: a configuration may hold several `rack` nodes, with device ids unique
   within each rack. A device is written `rack.device`, such as `lab.sw:28` in the wiring or
   `rackctl trace lab.sw:28`, or by its name alone when only one rack has a device of that

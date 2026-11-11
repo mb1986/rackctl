@@ -257,9 +257,8 @@ fn counts_the_problems_of_every_file() {
     let stderr = stderr(&output);
     assert!(stderr.contains("`units` must be between 1 and 60"));
     assert!(stderr.contains("the rack name `a` is used more than once"));
-    assert!(
-        stderr.contains(&format!("first used in {}, line 1", dir.path().join("a.kdl").display()))
-    );
+    assert!(stderr.contains("first used in a.kdl, line 1"));
+    assert!(stderr.contains("[b.kdl:1:"), "{stderr}");
     assert!(stderr.contains("unknown top-level node `shelf`"));
     assert_eq!(output.status.code(), Some(2));
 }

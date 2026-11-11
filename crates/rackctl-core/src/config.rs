@@ -58,8 +58,12 @@ pub fn load(path: &Path, catalog: &Catalog) -> Result<Config, Vec<FileError>> {
 
     let mut files = Vec::with_capacity(paths.len());
     let mut found = Found::default();
-    for path in &paths {
-        files.push(read_file(path, FileId(files.len()), &mut found));
+    // A file is named by its path in the configuration directory, or by its name alone.
+    let base = if path.is_dir() { Some(path) } else { path.parent() };
+    for file in &paths {
+        let name = base.and_then(|base| file.strip_prefix(base).ok()).unwrap_or(file);
+        let id = FileId(files.len());
+        files.push(read_file(file, name.display().to_string(), id, &mut found));
     }
     if has_problems(&files) {
         return Err(errors(files));
@@ -91,10 +95,10 @@ pub fn load(path: &Path, catalog: &Catalog) -> Result<Config, Vec<FileError>> {
     }
 }
 
-/// Reads the file at `path`, the file `id`, and gathers what it holds into `found`.
-fn read_file(path: &Path, id: FileId, found: &mut Found) -> File {
-    let mut file =
-        File { name: path.display().to_string(), text: String::new(), problems: Vec::new() };
+/// Reads the file at `path`, the file `id`, and gathers what it holds into `found`. `name`
+/// is how the file is shown in problems.
+fn read_file(path: &Path, name: String, id: FileId, found: &mut Found) -> File {
+    let mut file = File { name, text: String::new(), problems: Vec::new() };
     match fs::read_to_string(path) {
         Ok(text) => file.text = text,
         Err(error) => {
@@ -428,17 +432,22 @@ mod tests {
 
     #[test]
     fn reports_a_rack_name_used_in_two_files() {
-        let (dir, loaded) = load_in(
-            &[("a.kdl", "// the first\nrack \"r\" units=4"), ("b.kdl", r#"rack "r" units=8"#)],
+        let (_dir, loaded) = load_in(
+            &[("a.kdl", "// the first\nrack \"r\" units=4"), ("site/b.kdl", r#"rack "r" units=8"#)],
             "",
         );
         let errors = loaded.expect_err("repeated name");
         assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].name(), dir.path().join("b.kdl").display().to_string());
+        assert_eq!(errors[0].name(), "site/b.kdl");
         let problem = &errors[0].problems()[0];
         assert_eq!(problem.message(), "the rack name `r` is used more than once");
-        let first = dir.path().join("a.kdl");
-        assert_eq!(problem.help(), Some(&*format!("first used in {}, line 2", first.display())));
+        assert_eq!(problem.help(), Some("first used in a.kdl, line 2"));
+    }
+
+    #[test]
+    fn names_a_single_file_without_its_directory() {
+        let (_dir, loaded) = load_in(&[("site/all.kdl", r#"rack "r" units=99"#)], "site/all.kdl");
+        assert_eq!(loaded.expect_err("invalid")[0].name(), "all.kdl");
     }
 
     #[test]
@@ -508,7 +517,7 @@ mod tests {
 
     #[test]
     fn reports_an_endpoint_used_in_two_files() {
-        let (dir, loaded) = load_in(
+        let (_dir, loaded) = load_in(
             &[
                 ("rack.kdl", RACK),
                 ("w1.kdl", "wiring {\n  net a:nic1 b:nic1\n}"),
@@ -518,20 +527,16 @@ mod tests {
         );
         let errors = loaded.expect_err("endpoints used twice");
         assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].name(), dir.path().join("w2.kdl").display().to_string());
-        let first = dir.path().join("w1.kdl").display().to_string();
+        assert_eq!(errors[0].name(), "w2.kdl");
         let problems: Vec<_> = errors[0]
             .problems()
             .iter()
             .map(|problem| (problem.message(), problem.help()))
             .collect();
-        let help = format!("first connected in {first}, line 2");
+        let help = Some("first connected in w1.kdl, line 2");
         assert_eq!(
             problems,
-            [
-                ("`b:nic1` is already connected", Some(help.as_str())),
-                ("`a:nic1` is already connected", Some(help.as_str())),
-            ]
+            [("`b:nic1` is already connected", help), ("`a:nic1` is already connected", help)]
         );
     }
 
@@ -639,7 +644,7 @@ mod tests {
             .expect("symlink");
         let errors = load(dir.path(), &Catalog::default()).expect_err("unreadable file");
         assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].name(), dir.path().join("link.kdl").display().to_string());
+        assert_eq!(errors[0].name(), "link.kdl");
         assert!(errors[0].problems()[0].message().starts_with("cannot read the file: "));
     }
 }
